@@ -3,7 +3,10 @@ import { Link, Route, Routes, useLocation, useNavigate, useParams } from "react-
 
 import {
   createLearner,
+  completeTopic,
   generateDiagnostic,
+  getCurrentTopic,
+  getLearningContent,
   getGoals,
   getLearningPath,
   getSkillAnalysis,
@@ -346,7 +349,7 @@ function LearningPathPage() {
             <article className={`path-card ${topic.status}`} key={topic.topic_id}>
               <div className="path-index">{String(index + 1).padStart(2, "0")}</div>
               <div className="path-card-main">
-                <div className="path-card-heading"><div><p className="path-status">{topic.status}</p><h2>{topic.title}</h2></div><span className="difficulty-label">{topic.difficulty}</span></div>
+                <div className="path-card-heading"><div><p className="path-status">{topic.status}</p>{topic.topic_id === path.current_topic_id ? <Link className="path-topic-link" to={`/learn/${learnerId}`}><h2>{topic.title}</h2></Link> : <h2>{topic.title}</h2>}</div><span className="difficulty-label">{topic.difficulty}</span></div>
                 <p className="path-reason">{topic.reason}</p>
                 {topic.prerequisites.length > 0 && <p className="prerequisite-line"><strong>Prerequisites:</strong> {topic.prerequisites.join(", ")}</p>}
               </div>
@@ -354,6 +357,70 @@ function LearningPathPage() {
             </article>
           ))}
         </section>
+      </main>
+    </div>
+  );
+}
+
+function LearningExperiencePage() {
+  const { learnerId } = useParams();
+  const navigate = useNavigate();
+  const [currentTopic, setCurrentTopic] = useState(null);
+  const [learningContent, setLearningContent] = useState(null);
+  const [error, setError] = useState("");
+  const [isCompleting, setIsCompleting] = useState(false);
+
+  useEffect(() => {
+    getCurrentTopic(learnerId)
+      .then((topic) => {
+        setCurrentTopic(topic);
+        return getLearningContent(learnerId, topic.topic_id);
+      })
+      .then(setLearningContent)
+      .catch((requestError) => setError(requestError.message));
+  }, [learnerId]);
+
+  async function handleComplete() {
+    setError("");
+    setIsCompleting(true);
+    try {
+      await completeTopic(learnerId, currentTopic.topic_id);
+      navigate(`/learning-path/${learnerId}`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsCompleting(false);
+    }
+  }
+
+  if (error && !learningContent) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to={`/learning-path/${learnerId}`}>Return to learning path</Link></main></div>;
+  if (!currentTopic || !learningContent) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><span className="loading-mark">● ● ●</span><p>Preparing a lesson for your current focus...</p></main></div>;
+
+  const content = learningContent.content;
+  return (
+    <div className="app-shell">
+      <ProgressHeader activeStep={4} />
+      <main className="lesson-shell">
+        <header className="lesson-heading">
+          <div><p className="eyebrow">Learn / topic {currentTopic.position} of {currentTopic.total_topics}</p><h1>{content.topic_title}</h1><p className="hero-copy">{content.overview}</p></div>
+          <div className="lesson-status"><span>{learningContent.source === "openrouter" ? "Personalized lesson" : "Curated lesson"}</span><strong>{currentTopic.status.replace("_", " ")}</strong></div>
+        </header>
+        <div className="lesson-layout">
+          <aside className="lesson-sidebar">
+            <p className="section-label">Learning objectives</p>
+            <ul>{content.learning_objectives.map((objective) => <li key={objective}>{objective}</li>)}</ul>
+            {currentTopic.prerequisites.length > 0 && <><p className="section-label">Prerequisites</p><p className="lesson-muted">{currentTopic.prerequisites.join(", ")}</p></>}
+          </aside>
+          <article className="lesson-content">
+            <section className="lesson-section"><p className="eyebrow">The idea</p><h2>Build the mental model.</h2><p>{content.explanation}</p>{content.analogy && <blockquote>{content.analogy}</blockquote>}</section>
+            <section className="lesson-section"><p className="eyebrow">Key concepts</p><div className="concept-tags">{content.key_concepts.map((concept) => <span key={concept}>{concept}</span>)}</div><div className="example-grid">{content.examples.map((example, index) => <div className="example-block" key={example}><span>Example 0{index + 1}</span><p>{example}</p></div>)}</div></section>
+            <section className="lesson-section practical-section"><p className="eyebrow">Put it to work</p><h2>A practical example.</h2><p>{content.practical_example}</p>{content.code_example && <pre><code>{content.code_example}</code></pre>}</section>
+            <section className="lesson-section split-section"><div><p className="eyebrow">Watch for</p><ul>{content.common_mistakes.map((mistake) => <li key={mistake}>{mistake}</li>)}</ul></div><div><p className="eyebrow">Quick recap</p><ul>{content.quick_recap.map((item) => <li key={item}>{item}</li>)}</ul></div></section>
+            {content.important_notes.length > 0 && <section className="note-strip"><strong>Important:</strong> {content.important_notes.join(" ")}</section>}
+            <ErrorMessage message={error} />
+            <div className="lesson-actions"><button className="primary-button" disabled={isCompleting} onClick={handleComplete} type="button">{isCompleting ? "Saving progress..." : "Mark topic complete"}</button><Link className="text-link" to={`/learning-path/${learnerId}`}>Back to path</Link></div>
+          </article>
+        </div>
       </main>
     </div>
   );
@@ -367,6 +434,7 @@ function App() {
       <Route path="/diagnostic/:learnerId" element={<DiagnosticPage />} />
       <Route path="/analysis/:learnerId" element={<AnalysisPage />} />
       <Route path="/learning-path/:learnerId" element={<LearningPathPage />} />
+      <Route path="/learn/:learnerId" element={<LearningExperiencePage />} />
     </Routes>
   );
 }

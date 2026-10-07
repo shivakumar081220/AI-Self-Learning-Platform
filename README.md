@@ -2,7 +2,7 @@
 
 AI-powered adaptive learning platform for the Generative AI track.
 
-## Phase 1 through Phase 5 status
+## Phase 1 through Phase 6 status
 
 This repository currently contains the project foundation and database catalog:
 
@@ -23,6 +23,10 @@ This repository currently contains the project foundation and database catalog:
 - Responsive Learning Path screen with progress and prerequisite visibility
 - OpenRouter AI provider integration through the OpenAI-compatible SDK
 - Provider-error and invalid-output fallback to curated diagnostic questions
+- Structured AI-assisted Learning Experience content with curated per-topic fallback
+- Context-aware lesson generation using learner goal, level, weak concepts, completed topics, and recent assessments
+- Topic progress lifecycle from `in_progress` to `completed`
+- Learning page with objectives, explanations, examples, practical application, mistakes, recap, and completion action
 
 The catalog currently contains nine Generative AI topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems.
 
@@ -55,6 +59,15 @@ OPENROUTER_MODEL=openrouter/free
 ```
 
 The provider is optional for local startup. Missing keys, provider errors, rate limits, network failures, empty responses, and invalid Pydantic output all fall back to the curated diagnostic question set. The application never returns or logs the provider key.
+
+## Phase 6 Learning Experience
+
+- `GET /api/learners/{learner_id}/learning-path/current` returns the current recommended topic.
+- `GET /api/learners/{learner_id}/topics/{topic_id}/content` retrieves personalized lesson content and starts the topic.
+- `POST /api/learners/{learner_id}/topics/{topic_id}/content/generate` generates the lesson through the same validated service.
+- `POST /api/learners/{learner_id}/topics/{topic_id}/complete` persists completion and advances the path position without changing skill scores.
+
+Learning content is validated with the `LearningContent` Pydantic schema. OpenRouter receives only curated topic metadata and deterministic learner context. Generated content must return the exact requested catalog topic ID and title. Missing keys, provider failures, malformed JSON, invalid schema, and attempted topic injection use curated topic content instead. Only the current recommended topic or a previously completed topic can be opened.
 
 ## Local setup
 

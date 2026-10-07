@@ -42,3 +42,15 @@ export function getLearningPath(learnerId) {
 export function regenerateLearningPath(learnerId) {
   return request(`/learners/${learnerId}/learning-path/regenerate`, { method: "POST" });
 }
+
+export function getCurrentTopic(learnerId) {
+  return request(`/learners/${learnerId}/learning-path/current`);
+}
+
+export function getLearningContent(learnerId, topicId) {
+  return request(`/learners/${learnerId}/topics/${topicId}/content`);
+}
+
+export function completeTopic(learnerId, topicId) {
+  return request(`/learners/${learnerId}/topics/${topicId}/complete`, { method: "POST" });
+}

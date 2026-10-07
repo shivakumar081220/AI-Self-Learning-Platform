@@ -134,3 +134,37 @@ class LearningPathResponse(BaseModel):
     current_topic_title: str | None
     overall_rationale: str
     topics: list[LearningPathTopic]
+
+
+class CurrentTopicResponse(BaseModel):
+    learner_id: int
+    topic_id: str
+    title: str
+    difficulty: str
+    position: int
+    total_topics: int
+    status: Literal["in_progress", "completed", "pending", "remediation"]
+    prerequisites: list[str]
+
+
+class LearningContent(BaseModel):
+    topic_id: str = Field(min_length=2, max_length=80)
+    topic_title: str = Field(min_length=2, max_length=160)
+    overview: str = Field(min_length=20, max_length=800)
+    learning_objectives: list[str] = Field(min_length=2, max_length=6)
+    explanation: str = Field(min_length=40, max_length=3000)
+    key_concepts: list[str] = Field(min_length=2, max_length=8)
+    examples: list[str] = Field(min_length=1, max_length=5)
+    practical_example: str = Field(min_length=20, max_length=1600)
+    common_mistakes: list[str] = Field(min_length=1, max_length=5)
+    quick_recap: list[str] = Field(min_length=2, max_length=6)
+    analogy: str | None = Field(default=None, max_length=900)
+    code_example: str | None = Field(default=None, max_length=1800)
+    important_notes: list[str] = Field(default_factory=list, max_length=6)
+
+
+class LearningContentResponse(BaseModel):
+    learner_id: int
+    content: LearningContent
+    source: Literal["openrouter", "curated_fallback"]
+    topic_status: Literal["in_progress", "completed", "pending", "remediation"]
