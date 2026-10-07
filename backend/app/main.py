@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import models
 from .database import Base, SessionLocal, engine
 from .seed_topics import seed_topics
-from .routers import diagnostic, learners
+from .routers import diagnostic, learning_path, learners
 
 
 @asynccontextmanager
@@ -36,6 +36,7 @@ app.add_middleware(
 
 app.include_router(learners.router)
 app.include_router(diagnostic.router)
+app.include_router(learning_path.router)
 
 
 @app.get("/api/health")

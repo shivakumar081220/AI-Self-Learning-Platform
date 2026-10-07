@@ -113,3 +113,24 @@ class SkillAnalysisResponse(BaseModel):
 class DiagnosticSubmitResponse(SkillAnalysisResponse):
     assessment_id: int
     answered_questions: int
+
+
+class LearningPathTopic(BaseModel):
+    topic_id: str
+    title: str
+    difficulty: str
+    status: Literal["completed", "current", "pending", "remediation"]
+    prerequisites: list[str]
+    reason: str
+    relevance_score: float
+
+
+class LearningPathResponse(BaseModel):
+    path_id: int
+    learner_id: int
+    goal: str
+    current_index: int
+    current_topic_id: str | None
+    current_topic_title: str | None
+    overall_rationale: str
+    topics: list[LearningPathTopic]

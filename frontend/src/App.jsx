@@ -5,7 +5,9 @@ import {
   createLearner,
   generateDiagnostic,
   getGoals,
+  getLearningPath,
   getSkillAnalysis,
+  regenerateLearningPath,
   submitDiagnostic,
 } from "./api/client";
 
@@ -54,12 +56,14 @@ function ProgressHeader({ activeStep }) {
       <Link className="brand-link" to="/">
         Adaptive AI
       </Link>
-      <div className="progress-track" aria-label={`Step ${activeStep} of 3`}>
+      <div className="progress-track" aria-label={`Step ${activeStep} of 4`}>
         <span className={activeStep >= 1 ? "progress-dot active" : "progress-dot"}>01</span>
         <span className="progress-line" />
         <span className={activeStep >= 2 ? "progress-dot active" : "progress-dot"}>02</span>
         <span className="progress-line" />
         <span className={activeStep >= 3 ? "progress-dot active" : "progress-dot"}>03</span>
+        <span className="progress-line" />
+        <span className={activeStep >= 4 ? "progress-dot active" : "progress-dot"}>04</span>
       </div>
       <span className="track-label">Generative AI</span>
     </header>
@@ -291,7 +295,65 @@ function AnalysisPage() {
           <div className="analysis-column"><h2>Developing areas</h2>{analysis.developing_areas.length ? analysis.developing_areas.map((skill) => <SkillBar key={skill.concept} skill={skill} />) : <p className="empty-copy">No developing areas yet.</p>}</div>
           <div className="analysis-column"><h2>Needs attention</h2>{analysis.weak_areas.length ? analysis.weak_areas.map((skill) => <SkillBar key={skill.concept} skill={skill} />) : <p className="empty-copy">No weak areas detected.</p>}</div>
         </section>
-        <section className="next-step-banner"><div><p className="eyebrow">Prepared for the next step</p><h2>Your learning path will use these scores.</h2></div><span className="next-arrow">→</span></section>
+        <Link className="next-step-banner" to={`/learning-path/${learnerId}`}><div><p className="eyebrow">Prepared for the next step</p><h2>Open your personalized learning path.</h2></div><span className="next-arrow">→</span></Link>
+      </main>
+    </div>
+  );
+}
+
+function LearningPathPage() {
+  const { learnerId } = useParams();
+  const [path, setPath] = useState(null);
+  const [error, setError] = useState("");
+  const [isRegenerating, setIsRegenerating] = useState(false);
+
+  useEffect(() => {
+    getLearningPath(learnerId).then(setPath).catch((requestError) => setError(requestError.message));
+  }, [learnerId]);
+
+  async function handleRegenerate() {
+    setError("");
+    setIsRegenerating(true);
+    try {
+      setPath(await regenerateLearningPath(learnerId));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsRegenerating(false);
+    }
+  }
+
+  if (error && !path) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><ErrorMessage message={error} /></main></div>;
+  if (!path) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><span className="loading-mark">● ● ●</span><p>Assembling the sequence that fits you...</p></main></div>;
+
+  const completedCount = path.topics.filter((topic) => topic.status === "completed").length;
+  return (
+    <div className="app-shell">
+      <ProgressHeader activeStep={4} />
+      <main className="path-shell">
+        <section className="path-heading">
+          <div>
+            <p className="eyebrow">Step 04 / personalized path</p>
+            <h1>Built around your next move.</h1>
+            <p className="hero-copy">{path.overall_rationale}</p>
+          </div>
+          <div className="path-summary"><strong>{completedCount}/{path.topics.length}</strong><span>topics completed</span></div>
+        </section>
+        <div className="path-toolbar"><span>{path.current_topic_title ? `Current focus: ${path.current_topic_title}` : "Path ready for learning"}</span><button className="secondary-button" disabled={isRegenerating} onClick={handleRegenerate} type="button">{isRegenerating ? "Recalculating..." : "Recalculate path"}</button></div>
+        <ErrorMessage message={error} />
+        <section className="path-list">
+          {path.topics.map((topic, index) => (
+            <article className={`path-card ${topic.status}`} key={topic.topic_id}>
+              <div className="path-index">{String(index + 1).padStart(2, "0")}</div>
+              <div className="path-card-main">
+                <div className="path-card-heading"><div><p className="path-status">{topic.status}</p><h2>{topic.title}</h2></div><span className="difficulty-label">{topic.difficulty}</span></div>
+                <p className="path-reason">{topic.reason}</p>
+                {topic.prerequisites.length > 0 && <p className="prerequisite-line"><strong>Prerequisites:</strong> {topic.prerequisites.join(", ")}</p>}
+              </div>
+              {topic.topic_id === path.current_topic_id && <span className="current-marker">Next</span>}
+            </article>
+          ))}
+        </section>
       </main>
     </div>
   );
@@ -304,6 +366,7 @@ function App() {
       <Route path="/profile" element={<ProfilePage />} />
       <Route path="/diagnostic/:learnerId" element={<DiagnosticPage />} />
       <Route path="/analysis/:learnerId" element={<AnalysisPage />} />
+      <Route path="/learning-path/:learnerId" element={<LearningPathPage />} />
     </Routes>
   );
 }

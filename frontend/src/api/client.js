@@ -34,3 +34,11 @@ export function submitDiagnostic(learnerId, assessmentId, answers) {
 export function getSkillAnalysis(learnerId) {
   return request(`/learners/${learnerId}/skills`);
 }
+
+export function getLearningPath(learnerId) {
+  return request(`/learners/${learnerId}/learning-path`);
+}
+
+export function regenerateLearningPath(learnerId) {
+  return request(`/learners/${learnerId}/learning-path/regenerate`, { method: "POST" });
+}

@@ -126,6 +126,7 @@ class LearningPath(Base):
     learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id"), index=True)
     goal: Mapped[str] = mapped_column(Text)
     path_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    overall_rationale: Mapped[str] = mapped_column(Text, default="")
     current_index: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

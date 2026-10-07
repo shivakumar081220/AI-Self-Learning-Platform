@@ -2,7 +2,7 @@
 
 AI-powered adaptive learning platform for the Generative AI track.
 
-## Phase 1, Phase 2, and Phase 3 status
+## Phase 1 through Phase 4 status
 
 This repository currently contains the project foundation and database catalog:
 
@@ -18,6 +18,9 @@ This repository currently contains the project foundation and database catalog:
 - Deterministic MCQ scoring and concept-level skill analysis
 - SQLite persistence for diagnostic attempts and skill scores
 - Responsive profile, diagnostic, and analysis screens
+- Deterministic prerequisite-aware personalized learning-path engine
+- Learning-path persistence, regeneration, current-topic tracking, and rationale
+- Responsive Learning Path screen with progress and prerequisite visibility
 
 The catalog currently contains nine Generative AI topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems.
 
@@ -30,6 +33,14 @@ The catalog currently contains nine Generative AI topics, from foundations and p
 - `GET /api/learners/{learner_id}/skills` returns strong, developing, weak, and individual concept scores.
 
 Diagnostic questions keep answer keys and concept metadata server-side. OpenAI-generated output is validated with Pydantic; if the API is unavailable, the curated catalog-backed question set allows the flow to continue.
+
+## Phase 4 adaptive path
+
+- `GET /api/learners/{learner_id}/learning-path` returns the persisted current path.
+- `POST /api/learners/{learner_id}/learning-path/generate` creates a path from current learner state.
+- `POST /api/learners/{learner_id}/learning-path/regenerate` recalculates the path while preserving the current topic when possible.
+
+The path engine uses learner goal, experience level, concept scores, weak concepts, completed topics, prerequisite relationships, and recent topic assessment scores. It ranks only valid catalog topics, enforces prerequisite order, skips mastered topics from new recommendations, and stores a reason for every selected topic. No LLM is responsible for topic selection.
 
 ## Local setup
 
