@@ -537,6 +537,56 @@ input:not([type="radio"]):focus {
   padding: 72px 0 96px;
 }
 
+.learner-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(100px, 0.5fr));
+  gap: 22px;
+  align-items: end;
+  margin-bottom: 44px;
+  padding: 22px 0;
+  border-top: 1px solid #cbd5c9;
+  border-bottom: 1px solid #cbd5c9;
+}
+
+.learner-overview h2 {
+  margin: 0 0 6px;
+  color: #17211b;
+  font-size: 1.5rem;
+  font-weight: 500;
+}
+
+.learner-overview p:not(.eyebrow) {
+  margin: 0;
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.overview-stat {
+  padding-left: 16px;
+  border-left: 1px solid #a9b6a8;
+}
+
+.overview-stat strong,
+.overview-stat span {
+  display: block;
+}
+
+.overview-stat strong {
+  color: #9a6a42;
+  font-size: 2rem;
+  font-weight: 500;
+}
+
+.overview-stat span {
+  margin-top: 5px;
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+}
+
 .path-heading {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 180px;
@@ -589,6 +639,92 @@ input:not([type="radio"]):focus {
   color: #536058;
   font-family: "Trebuchet MS", sans-serif;
   font-size: 0.82rem;
+}
+
+.recommendation-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 22px;
+  padding: 18px 20px;
+  border-left: 3px solid #58735d;
+  background: #e5ede1;
+}
+
+.recommendation-strip.remediate {
+  border-color: #a3553b;
+  background: #f3e3dc;
+}
+
+.recommendation-strip.practice {
+  border-color: #c7955e;
+  background: #f0eadb;
+}
+
+.recommendation-strip .eyebrow {
+  margin-bottom: 7px;
+}
+
+.recommendation-strip strong,
+.recommendation-strip p:not(.eyebrow) {
+  display: block;
+  margin: 0;
+  color: #536058;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.recommendation-strip strong {
+  color: #17211b;
+  font-size: 1rem;
+}
+
+.recommendation-strip > span {
+  color: #58735d;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.concept-overview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 22px;
+  padding: 18px 0;
+  border-bottom: 1px solid #d1d8cd;
+}
+
+.concept-overview .eyebrow {
+  margin-bottom: 9px;
+}
+
+.mini-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.mini-tags span {
+  padding: 5px 8px;
+  border: 1px solid #b8c5b7;
+  color: #58735d;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.68rem;
+  text-transform: capitalize;
+}
+
+.mini-tags.weak-tags span {
+  border-color: #d0a08f;
+  color: #a3553b;
+}
+
+.mini-tags em {
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.76rem;
 }
 
 .secondary-button {
@@ -1116,6 +1252,25 @@ pre {
   .path-heading {
     display: block;
     padding-bottom: 34px;
+  }
+
+  .learner-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    margin-bottom: 34px;
+  }
+
+  .learner-overview > div:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .recommendation-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .concept-overview {
+    grid-template-columns: 1fr;
   }
 
   .lesson-shell {

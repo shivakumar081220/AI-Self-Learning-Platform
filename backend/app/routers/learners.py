@@ -4,13 +4,16 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..goal_catalog import GOAL_BY_KEY, GOAL_OPTIONS
-from ..models import Learner, LearningGoal, SkillScore
+from ..models import Assessment, Learner, LearningGoal, LearningPath, Recommendation, SkillScore, Topic, TopicProgress
 from ..schemas import (
     GoalOption,
     LearnerCreate,
     LearnerResponse,
     SkillAnalysisResponse,
     SkillScoreResponse,
+    LatestAssessmentSummary,
+    LearnerSummaryResponse,
+    RecommendationResponse,
 )
 
 
@@ -102,3 +105,81 @@ def get_skill_analysis(
         select(SkillScore).where(SkillScore.learner_id == learner_id)
     ).all()
     return build_skill_analysis(learner_id, skills)
+
+
+@router.get("/learners/{learner_id}/summary", response_model=LearnerSummaryResponse)
+def get_learner_summary(
+    learner_id: int, database: Session = Depends(get_db)
+) -> LearnerSummaryResponse:
+    learner = database.get(Learner, learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Learner not found")
+    analysis = build_skill_analysis(
+        learner_id,
+        database.scalars(select(SkillScore).where(SkillScore.learner_id == learner_id)).all(),
+    )
+    path = database.scalar(
+        select(LearningPath)
+        .where(LearningPath.learner_id == learner_id)
+        .order_by(LearningPath.created_at.desc())
+    )
+    progress = database.scalars(
+        select(TopicProgress).where(TopicProgress.learner_id == learner_id)
+    ).all()
+    current_item = path.path_json[path.current_index] if path and path.current_index < len(path.path_json) else None
+    completed_count = sum(
+        1 for item in progress if item.status == "completed" or item.mastery_score >= 0.8
+    )
+    total_topics = len(path.path_json) if path else 0
+    latest_assessment = database.scalar(
+        select(Assessment)
+        .where(Assessment.learner_id == learner_id, Assessment.completed_at.is_not(None), Assessment.topic_id.is_not(None))
+        .order_by(Assessment.completed_at.desc())
+    )
+    latest_summary = None
+    if latest_assessment and latest_assessment.topic_id:
+        topic = database.get(Topic, latest_assessment.topic_id)
+        if topic and latest_assessment.score is not None:
+            latest_summary = LatestAssessmentSummary(
+                topic_id=topic.id,
+                topic_title=topic.title,
+                percentage=round(latest_assessment.score * 100, 1),
+            )
+    recommendation_record = database.scalar(
+        select(Recommendation)
+        .where(Recommendation.learner_id == learner_id)
+        .order_by(Recommendation.created_at.desc())
+    )
+    recommendation = None
+    if recommendation_record:
+        target = database.get(Topic, recommendation_record.topic_id) if recommendation_record.topic_id else None
+        recommendation = RecommendationResponse(
+            action_type=recommendation_record.action_type,
+            target_topic_id=recommendation_record.topic_id,
+            target_topic_title=target.title if target else None,
+            summary=recommendation_record.reason,
+            next_action=(
+                "Review weak concepts and reassess before continuing."
+                if recommendation_record.action_type == "remediate"
+                else "Review focused examples before continuing."
+                if recommendation_record.action_type == "practice"
+                else "Continue to the next recommended topic."
+            ),
+            remediation=None,
+        )
+    return LearnerSummaryResponse(
+        learner_id=learner.id,
+        name=learner.name,
+        goal=learner.goal_text,
+        current_topic_id=current_item.get("topic_id") if current_item else None,
+        current_topic_title=current_item.get("title") if current_item else None,
+        completed_topics=completed_count,
+        total_topics=total_topics,
+        progress_percentage=round((completed_count / total_topics) * 100) if total_topics else 0,
+        overall_skill_percentage=analysis.overall_percentage,
+        strong_concepts=analysis.strong_areas,
+        developing_concepts=analysis.developing_areas,
+        weak_concepts=analysis.weak_areas,
+        latest_assessment=latest_summary,
+        recommendation=recommendation,
+    )

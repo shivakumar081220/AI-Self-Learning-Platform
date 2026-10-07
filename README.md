@@ -122,3 +122,113 @@ Copy `.env.example` to `.env` when configuring local development. Never commit `
 ## Planned MVP journey
 
 Learner Profile -> AI Goal Selection -> Diagnostic Assessment -> Skill Analysis -> Personalized Learning Path -> AI Learning Content -> Assessment -> Weakness Detection -> Adaptive Remediation or Recommendation.
+
+## Submission Overview
+
+### Problem
+
+Most course sequences treat every learner identically. This project builds a Generative AI learning experience that measures a learner, teaches the next useful topic, evaluates understanding, and changes the next action based on evidence.
+
+### Solution
+
+The platform combines a curated Generative AI topic graph, structured OpenRouter generation, SQLite learner state, and deterministic adaptation. A new learner can complete the full journey from the browser without editing code or database records.
+
+### Mandatory MVP features
+
+- Learner profile and Generative AI goal selection
+- Diagnostic MCQ assessment
+- Concept-level skill analysis
+- Personalized prerequisite-aware path
+- AI-assisted learning content
+- Post-learning topic assessment
+- Weak-topic detection
+- Adaptive remediation or progression
+
+## Tech Stack
+
+- Frontend: React, Vite, React Router, responsive CSS
+- Backend: Python, FastAPI, Pydantic, SQLAlchemy
+- Database: SQLite
+- AI: OpenRouter through the OpenAI-compatible SDK
+- Testing: Pytest and Vite production build
+
+## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data flow and service boundaries. See [docs/AI_DESIGN.md](docs/AI_DESIGN.md) for prompts, validation, fallback behavior, and the deterministic/AI boundary.
+
+## Local development
+
+### Backend
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --app-dir backend --reload
+```
+
+### Frontend
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend is normally available at `http://127.0.0.1:5173`; the API is at `http://127.0.0.1:8000`.
+
+## API overview
+
+- `POST /api/learners`: create a learner and goal
+- `POST /api/learners/{id}/diagnostic/generate`: generate diagnostic MCQs
+- `POST /api/learners/{id}/diagnostic/{assessment_id}/submit`: score diagnostic answers
+- `GET /api/learners/{id}/summary`: persisted dashboard state
+- `GET|POST /api/learners/{id}/learning-path`: retrieve or generate a path
+- `GET /api/learners/{id}/learning-path/current`: retrieve the current topic
+- `GET /api/learners/{id}/topics/{topic_id}/content`: load learning content
+- `POST /api/learners/{id}/topics/{topic_id}/complete`: complete learning and start assessment in the UI
+- `POST /api/learners/{id}/topics/{topic_id}/assessment/generate`: generate topic MCQs
+- `GET /api/learners/{id}/assessments/{assessment_id}`: retrieve questions or persisted results
+- `POST /api/learners/{id}/assessments/{assessment_id}/submit`: score and adapt
+
+## Adaptive logic
+
+The path engine ranks valid catalog topics using goal relevance, prerequisites, weak concepts, experience level, completed topics, and recent performance. Topic assessments classify concepts as weak, developing, or strong. Weak results keep the topic active for remediation; developing results request focused practice; strong results advance to the next topic.
+
+Skill state is persisted. After the first observation, a topic-assessment skill score uses `0.6 * previous_score + 0.4 * latest_assessment_score`. This means one assessment updates the learner without erasing their history.
+
+## AI versus deterministic logic
+
+AI handles generated questions, explanations, learning content, examples, and alternate teaching material. Deterministic code handles scoring, skill state, weakness detection, prerequisites, path selection, progress, recommendations, authorization, and database updates. Every structured AI response is validated with Pydantic before use.
+
+## Reliability and fallback
+
+The application works without OpenRouter. Missing keys, provider failures, rate limits, network errors, empty responses, or invalid structured output use curated diagnostic questions, topic assessment questions, or curated learning content. Frontend failures use human-readable messages and do not expose stack traces or provider details.
+
+## Demo steps
+
+1. Open the frontend and create a learner profile.
+2. Select a Generative AI goal and experience level.
+3. Complete the diagnostic and inspect concept-level skill analysis.
+4. Open the personalized path and select the current topic.
+5. Read the personalized or curated learning content.
+6. Mark the topic complete; the topic assessment opens automatically.
+7. Submit weak answers to demonstrate remediation, or correct answers to demonstrate progression.
+8. Inspect “What changed based on your result?” and the updated path/dashboard.
+9. Refresh the result or path page to demonstrate persisted learner state.
+
+## Testing
+
+```powershell
+$env:PYTHONPATH = "backend"
+python -m pytest backend/tests -q
+cd frontend
+npm run build
+```
+
+All automated AI tests mock OpenRouter. No test makes a real provider request.
+
+## Known limitations and future improvements
+
+The MVP supports one Generative AI track and MCQ assessments. Authentication, conversational tutoring, retrieval over external sources, additional question types, and deployment are future improvements. SQLite startup creation is intentionally lightweight for this challenge; a migration tool would be appropriate for a larger production deployment.

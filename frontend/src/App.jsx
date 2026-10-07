@@ -11,6 +11,7 @@ import {
   getLearningContent,
   getGoals,
   getLearningPath,
+  getLearnerSummary,
   getSkillAnalysis,
   regenerateLearningPath,
   submitAssessment,
@@ -310,11 +311,13 @@ function AnalysisPage() {
 function LearningPathPage() {
   const { learnerId } = useParams();
   const [path, setPath] = useState(null);
+  const [summary, setSummary] = useState(null);
   const [error, setError] = useState("");
   const [isRegenerating, setIsRegenerating] = useState(false);
 
   useEffect(() => {
     getLearningPath(learnerId).then(setPath).catch((requestError) => setError(requestError.message));
+    getLearnerSummary(learnerId).then(setSummary).catch(() => {});
   }, [learnerId]);
 
   async function handleRegenerate() {
@@ -329,7 +332,7 @@ function LearningPathPage() {
     }
   }
 
-  if (error && !path) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><ErrorMessage message={error} /></main></div>;
+  if (error && !path) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to="/profile">Start a learner profile</Link></main></div>;
   if (!path) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><span className="loading-mark">● ● ●</span><p>Assembling the sequence that fits you...</p></main></div>;
 
   const completedCount = path.topics.filter((topic) => topic.status === "completed").length;
@@ -337,6 +340,7 @@ function LearningPathPage() {
     <div className="app-shell">
       <ProgressHeader activeStep={4} />
       <main className="path-shell">
+        {summary && <section className="learner-overview"><div><p className="eyebrow">Learner dashboard</p><h2>{summary.name}</h2><p>{summary.goal}</p></div><div className="overview-stat"><strong>{summary.progress_percentage}%</strong><span>path progress</span></div><div className="overview-stat"><strong>{summary.overall_skill_percentage}%</strong><span>skill readiness</span></div>{summary.latest_assessment && <div className="overview-stat"><strong>{summary.latest_assessment.percentage}%</strong><span>latest assessment</span></div>}</section>}
         <section className="path-heading">
           <div>
             <p className="eyebrow">Step 04 / personalized path</p>
@@ -347,6 +351,8 @@ function LearningPathPage() {
         </section>
         <div className="path-toolbar"><span>{path.current_topic_title ? `Current focus: ${path.current_topic_title}` : "Path ready for learning"}</span><button className="secondary-button" disabled={isRegenerating} onClick={handleRegenerate} type="button">{isRegenerating ? "Recalculating..." : "Recalculate path"}</button></div>
         <ErrorMessage message={error} />
+        {summary?.recommendation && <section className={`recommendation-strip ${summary.recommendation.action_type}`}><div><p className="eyebrow">Current recommendation</p><strong>{summary.recommendation.target_topic_title || "Continue your path"}</strong><p>{summary.recommendation.summary}</p></div><span>{summary.recommendation.action_type}</span></section>}
+        {summary && <section className="concept-overview"><div><p className="eyebrow">Strong concepts</p><div className="mini-tags">{summary.strong_concepts.length ? summary.strong_concepts.map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No strong concepts recorded yet</em>}</div></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary.weak_concepts.length ? summary.weak_concepts.map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open weaknesses</em>}</div></div></section>}
         <section className="path-list">
           {path.topics.map((topic, index) => (
             <article className={`path-card ${topic.status}`} key={topic.topic_id}>
@@ -430,13 +436,13 @@ function LearningExperiencePage() {
   );
 }
 
-function AssessmentResult({ learnerId, result, onRetry }) {
+function AssessmentResult({ learnerId, result, onRetry, isRetrying }) {
   const weak = result.weak_concepts || [];
   return (
     <main className="assessment-result-shell">
       <section className="result-heading"><p className="eyebrow">Assessment result / {result.topic_title}</p><h1>Now we know what changed.</h1><p className="hero-copy">Your result is now part of the learner state that controls what comes next.</p><div className="result-score"><strong>{result.percentage}%</strong><span>{result.correct_count} / {result.total_questions} correct</span></div></section>
       <section className="result-grid"><div><h2>Concept performance</h2>{result.concept_results.map((concept) => <div className="result-concept" key={concept.concept}><div><span>{concept.concept.replaceAll("_", " ")}</span><strong>{concept.percentage}%</strong></div><div className="skill-bar"><span className={`skill-fill ${concept.level}`} style={{ width: `${concept.percentage}%` }} /></div><p>{concept.level}</p></div>)}</div><div className={`adaptation-card ${result.recommendation.action_type}`}><p className="eyebrow">What changed based on your result?</p><h2>{weak.length ? weak.map((concept) => concept.replaceAll("_", " ")).join(", ") : "Your next step"}</h2><p>{result.recommendation.summary}</p><strong>{result.recommendation.next_action}</strong>{result.recommendation.remediation && <blockquote>{result.recommendation.remediation}</blockquote>}</div></section>
-      <div className="result-actions"><Link className="primary-button" to={weak.length ? `/learn/${learnerId}` : `/learning-path/${learnerId}`}>{weak.length ? "Review weak topic" : "Continue learning"}</Link><button className="secondary-button" onClick={onRetry} type="button">Retry assessment</button></div>
+      <div className="result-actions"><Link className="primary-button" to={weak.length ? `/learn/${learnerId}` : `/learning-path/${learnerId}`}>{weak.length ? "Review weak topic" : "Continue learning"}</Link><button className="secondary-button" disabled={isRetrying} onClick={onRetry} type="button">{isRetrying ? "Preparing retry..." : "Retry assessment"}</button></div>
     </main>
   );
 }
@@ -449,6 +455,7 @@ function AssessmentPage() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   useEffect(() => {
     getAssessment(learnerId, assessmentId).then((data) => {
@@ -472,16 +479,20 @@ function AssessmentPage() {
   }
 
   async function handleRetry() {
+    setError("");
+    setIsRetrying(true);
     try {
       const nextAssessment = await generateAssessment(learnerId, result.topic_id);
       navigate(`/assessment/${learnerId}/${nextAssessment.assessment_id}`);
     } catch (requestError) {
       setError(requestError.message);
+    } finally {
+      setIsRetrying(false);
     }
   }
 
   if (error) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to={`/learning-path/${learnerId}`}>Return to path</Link></main></div>;
-  if (result) return <div className="app-shell"><ProgressHeader activeStep={4} /><AssessmentResult learnerId={learnerId} result={result} onRetry={handleRetry} /></div>;
+  if (result) return <div className="app-shell"><ProgressHeader activeStep={4} /><AssessmentResult learnerId={learnerId} result={result} onRetry={handleRetry} isRetrying={isRetrying} /></div>;
   if (!assessment) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><span className="loading-mark">● ● ●</span><p>Preparing your topic assessment...</p></main></div>;
 
   const answeredCount = Object.keys(answers).length;

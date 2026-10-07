@@ -1,13 +1,24 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api";
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json", ...options.headers },
-    ...options,
-  });
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: { "Content-Type": "application/json", ...options.headers },
+      ...options,
+    });
+  } catch {
+    throw new Error("The learning service is unavailable. Check that the backend is running and try again.");
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(body.detail || "The learning service could not complete this request.");
+    const messages = {
+      403: "This learning activity is not available for your current path.",
+      404: "We could not find that learner activity.",
+      422: "Please check the submitted information and try again.",
+      500: "The learning service encountered a problem. Please try again.",
+    };
+    throw new Error(messages[response.status] || (typeof body.detail === "string" ? body.detail : "The learning service could not complete this request."));
   }
   return body;
 }
@@ -33,6 +44,10 @@ export function submitDiagnostic(learnerId, assessmentId, answers) {
 
 export function getSkillAnalysis(learnerId) {
   return request(`/learners/${learnerId}/skills`);
+}
+
+export function getLearnerSummary(learnerId) {
+  return request(`/learners/${learnerId}/summary`);
 }
 
 export function getLearningPath(learnerId) {

@@ -255,3 +255,26 @@ class AssessmentResultResponse(BaseModel):
     weak_concepts: list[str]
     strong_concepts: list[str]
     recommendation: RecommendationResponse
+
+
+class LatestAssessmentSummary(BaseModel):
+    topic_id: str
+    topic_title: str
+    percentage: float
+
+
+class LearnerSummaryResponse(BaseModel):
+    learner_id: int
+    name: str
+    goal: str
+    current_topic_id: str | None
+    current_topic_title: str | None
+    completed_topics: int
+    total_topics: int
+    progress_percentage: int
+    overall_skill_percentage: int
+    strong_concepts: list[SkillScoreResponse]
+    developing_concepts: list[SkillScoreResponse]
+    weak_concepts: list[SkillScoreResponse]
+    latest_assessment: LatestAssessmentSummary | None
+    recommendation: RecommendationResponse | None
