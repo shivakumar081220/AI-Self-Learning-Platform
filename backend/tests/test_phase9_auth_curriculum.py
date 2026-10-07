@@ -76,7 +76,16 @@ def test_two_users_receive_different_persisted_curricula_and_isolated_data(clien
     assert course_a["course_title"] != course_b["course_title"]
     assert client.get(f"/api/learners/{learner_b['id']}/summary", headers=headers_a).status_code == 403
     assert client.get(f"/api/learners/{learner_a['id']}/summary", headers=headers_b).status_code == 403
+    assert client.get(f"/api/learners/{learner_b['id']}", headers=headers_a).status_code == 403
+    assert client.get(f"/api/learners/{learner_a['id']}/skills", headers=headers_b).status_code == 403
+    assert client.get(f"/api/learners/{learner_b['id']}/learning-path", headers=headers_a).status_code == 403
+    assert client.get(f"/api/learners/{learner_a['id']}/learning-path/current", headers=headers_b).status_code == 403
+    assert (
+        client.post(f"/api/learners/{learner_b['id']}/diagnostic/generate", headers=headers_a).status_code
+        == 403
+    )
     assert client.get("/api/curriculum/current", headers=headers_a).json()["course_id"] == course_a["course_id"]
+    assert client.get("/api/curriculum/current", headers=headers_b).json()["course_id"] == course_b["course_id"]
 
 
 def test_generated_curriculum_is_persisted_and_path_uses_generated_topics(client: TestClient):

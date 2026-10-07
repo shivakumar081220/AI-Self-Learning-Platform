@@ -15,6 +15,7 @@ import {
   getLearnerSummary,
   getMyLearner,
   generateMyCurriculum,
+  getMyCurriculum,
   getSkillAnalysis,
   regenerateLearningPath,
   submitAssessment,
