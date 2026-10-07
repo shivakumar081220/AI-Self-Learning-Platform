@@ -2,7 +2,7 @@
 
 AI-powered adaptive learning platform for the Generative AI track.
 
-## Phase 1 through Phase 6 status
+## Phase 1 through Phase 7 status
 
 This repository currently contains the project foundation and database catalog:
 
@@ -27,6 +27,9 @@ This repository currently contains the project foundation and database catalog:
 - Context-aware lesson generation using learner goal, level, weak concepts, completed topics, and recent assessments
 - Topic progress lifecycle from `in_progress` to `completed`
 - Learning page with objectives, explanations, examples, practical application, mistakes, recap, and completion action
+- Post-learning MCQ assessment tied to the completed topic
+- Deterministic concept scoring, weakness detection, skill updates, and adaptive remediation
+- Assessment result UI that makes the changed recommendation visible
 
 The catalog currently contains nine Generative AI topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems.
 
@@ -68,6 +71,16 @@ The provider is optional for local startup. Missing keys, provider errors, rate 
 - `POST /api/learners/{learner_id}/topics/{topic_id}/complete` persists completion and advances the path position without changing skill scores.
 
 Learning content is validated with the `LearningContent` Pydantic schema. OpenRouter receives only curated topic metadata and deterministic learner context. Generated content must return the exact requested catalog topic ID and title. Missing keys, provider failures, malformed JSON, invalid schema, and attempted topic injection use curated topic content instead. Only the current recommended topic or a previously completed topic can be opened.
+
+## Phase 7 Assessment and remediation
+
+- `POST /api/learners/{learner_id}/topics/{topic_id}/assessment/generate` creates a topic-specific MCQ assessment after learning is completed.
+- `GET /api/learners/{learner_id}/assessments/{assessment_id}` retrieves pending questions or the persisted result.
+- `POST /api/learners/{learner_id}/assessments/{assessment_id}/submit` performs deterministic scoring and persists adaptation state.
+
+Assessment answer keys and explanations remain server-side. OpenRouter may generate validated questions, but curated topic-specific MCQs are used when the provider is unavailable or output is invalid. The backend calculates the score and concept results using `<50% = weak`, `50–79% = developing`, and `>=80% = strong`.
+
+Historical skills use the deterministic update formula `new_score = 0.6 * previous_score + 0.4 * latest_assessment_score`; a first observed score uses the latest result directly. Weak concepts create or update open `Weakness` records, while improved concepts resolve active weaknesses. Recommendations are deterministic: weak results remediate, developing results practice, and strong results continue. The current path is updated in place using the Phase 4 engine, so weak learners remain on remediation while strong learners advance.
 
 ## Local setup
 

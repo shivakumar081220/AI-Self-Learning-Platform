@@ -4,13 +4,16 @@ import { Link, Route, Routes, useLocation, useNavigate, useParams } from "react-
 import {
   createLearner,
   completeTopic,
+  generateAssessment,
   generateDiagnostic,
+  getAssessment,
   getCurrentTopic,
   getLearningContent,
   getGoals,
   getLearningPath,
   getSkillAnalysis,
   regenerateLearningPath,
+  submitAssessment,
   submitDiagnostic,
 } from "./api/client";
 
@@ -385,7 +388,8 @@ function LearningExperiencePage() {
     setIsCompleting(true);
     try {
       await completeTopic(learnerId, currentTopic.topic_id);
-      navigate(`/learning-path/${learnerId}`);
+      const assessment = await generateAssessment(learnerId, currentTopic.topic_id);
+      navigate(`/assessment/${learnerId}/${assessment.assessment_id}`);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -426,6 +430,64 @@ function LearningExperiencePage() {
   );
 }
 
+function AssessmentResult({ learnerId, result, onRetry }) {
+  const weak = result.weak_concepts || [];
+  return (
+    <main className="assessment-result-shell">
+      <section className="result-heading"><p className="eyebrow">Assessment result / {result.topic_title}</p><h1>Now we know what changed.</h1><p className="hero-copy">Your result is now part of the learner state that controls what comes next.</p><div className="result-score"><strong>{result.percentage}%</strong><span>{result.correct_count} / {result.total_questions} correct</span></div></section>
+      <section className="result-grid"><div><h2>Concept performance</h2>{result.concept_results.map((concept) => <div className="result-concept" key={concept.concept}><div><span>{concept.concept.replaceAll("_", " ")}</span><strong>{concept.percentage}%</strong></div><div className="skill-bar"><span className={`skill-fill ${concept.level}`} style={{ width: `${concept.percentage}%` }} /></div><p>{concept.level}</p></div>)}</div><div className={`adaptation-card ${result.recommendation.action_type}`}><p className="eyebrow">What changed based on your result?</p><h2>{weak.length ? weak.map((concept) => concept.replaceAll("_", " ")).join(", ") : "Your next step"}</h2><p>{result.recommendation.summary}</p><strong>{result.recommendation.next_action}</strong>{result.recommendation.remediation && <blockquote>{result.recommendation.remediation}</blockquote>}</div></section>
+      <div className="result-actions"><Link className="primary-button" to={weak.length ? `/learn/${learnerId}` : `/learning-path/${learnerId}`}>{weak.length ? "Review weak topic" : "Continue learning"}</Link><button className="secondary-button" onClick={onRetry} type="button">Retry assessment</button></div>
+    </main>
+  );
+}
+
+function AssessmentPage() {
+  const { learnerId, assessmentId } = useParams();
+  const navigate = useNavigate();
+  const [assessment, setAssessment] = useState(null);
+  const [answers, setAnswers] = useState({});
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    getAssessment(learnerId, assessmentId).then((data) => {
+      if (data.concept_results) setResult(data);
+      else setAssessment(data);
+    }).catch((requestError) => setError(requestError.message));
+  }, [assessmentId, learnerId]);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setError("");
+    setIsSubmitting(true);
+    try {
+      const submitted = assessment.questions.map((question) => ({ question_id: question.question_id, selected_option: answers[question.question_id] }));
+      setResult(await submitAssessment(learnerId, assessmentId, submitted));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function handleRetry() {
+    try {
+      const nextAssessment = await generateAssessment(learnerId, result.topic_id);
+      navigate(`/assessment/${learnerId}/${nextAssessment.assessment_id}`);
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  }
+
+  if (error) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to={`/learning-path/${learnerId}`}>Return to path</Link></main></div>;
+  if (result) return <div className="app-shell"><ProgressHeader activeStep={4} /><AssessmentResult learnerId={learnerId} result={result} onRetry={handleRetry} /></div>;
+  if (!assessment) return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="center-state"><span className="loading-mark">● ● ●</span><p>Preparing your topic assessment...</p></main></div>;
+
+  const answeredCount = Object.keys(answers).length;
+  return <div className="app-shell"><ProgressHeader activeStep={4} /><main className="assessment-shell post-learning-assessment"><section className="assessment-heading"><p className="eyebrow">Assess / {assessment.topic_title}</p><h1>Show what stuck.</h1><p className="hero-copy">Answer these questions from the topic you just completed. Your result will shape the next recommendation.</p><div className="question-progress"><span style={{ width: `${(answeredCount / assessment.questions.length) * 100}%` }} /></div><p className="progress-copy">{answeredCount} of {assessment.questions.length} answered</p></section><form className="question-list" onSubmit={handleSubmit}>{assessment.questions.map((question, index) => <fieldset className="question-card" key={question.question_id}><legend><span>0{index + 1}</span>{question.question}</legend><div className="option-list">{question.options.map((option, optionIndex) => <label className={answers[question.question_id] === optionIndex ? "option selected" : "option"} key={option}><input checked={answers[question.question_id] === optionIndex} onChange={() => setAnswers((current) => ({ ...current, [question.question_id]: optionIndex }))} type="radio" name={question.question_id} /><span>{option}</span></label>)}</div></fieldset>)}<ErrorMessage message={error} /><button className="primary-button form-submit" disabled={isSubmitting || answeredCount !== assessment.questions.length} type="submit">{isSubmitting ? "Scoring your result..." : "Submit assessment"}</button></form></main></div>;
+}
+
 function App() {
   return (
     <Routes>
@@ -435,6 +497,7 @@ function App() {
       <Route path="/analysis/:learnerId" element={<AnalysisPage />} />
       <Route path="/learning-path/:learnerId" element={<LearningPathPage />} />
       <Route path="/learn/:learnerId" element={<LearningExperiencePage />} />
+      <Route path="/assessment/:learnerId/:assessmentId" element={<AssessmentPage />} />
     </Routes>
   );
 }

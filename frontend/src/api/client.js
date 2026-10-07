@@ -54,3 +54,18 @@ export function getLearningContent(learnerId, topicId) {
 export function completeTopic(learnerId, topicId) {
   return request(`/learners/${learnerId}/topics/${topicId}/complete`, { method: "POST" });
 }
+
+export function generateAssessment(learnerId, topicId) {
+  return request(`/learners/${learnerId}/topics/${topicId}/assessment/generate`, { method: "POST" });
+}
+
+export function getAssessment(learnerId, assessmentId) {
+  return request(`/learners/${learnerId}/assessments/${assessmentId}`);
+}
+
+export function submitAssessment(learnerId, assessmentId, answers) {
+  return request(`/learners/${learnerId}/assessments/${assessmentId}/submit`, {
+    method: "POST",
+    body: JSON.stringify({ answers }),
+  });
+}

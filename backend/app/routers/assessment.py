@@ -1,0 +1,212 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..database import get_db
+from ..models import Assessment, Learner, LearningPath, Recommendation, Topic, TopicProgress
+from ..schemas import (
+    AssessmentGenerateResponse,
+    AssessmentQuestionPublic,
+    AssessmentQuestionSet,
+    AssessmentResultResponse,
+    AssessmentSubmitRequest,
+    ConceptResult,
+    RecommendationResponse,
+)
+from ..services.assessment_result_service import apply_assessment_result, classify_score
+from ..services.assessment_service import generate_assessment_questions
+
+
+router = APIRouter(prefix="/api/learners/{learner_id}", tags=["assessment"])
+
+
+def _get_assessment_context(
+    learner_id: int, topic_id: str, database: Session, require_completed: bool = True
+) -> tuple[Learner, Topic, LearningPath, TopicProgress]:
+    learner = database.get(Learner, learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Learner not found")
+    topic = database.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found in curated catalog")
+    path = database.scalar(
+        select(LearningPath)
+        .where(LearningPath.learner_id == learner_id)
+        .order_by(LearningPath.created_at.desc())
+    )
+    if not path or topic_id not in {item.get("topic_id") for item in path.path_json}:
+        raise HTTPException(status_code=404, detail="Topic is not part of the learner's path")
+    progress = database.scalar(
+        select(TopicProgress).where(
+            TopicProgress.learner_id == learner_id,
+            TopicProgress.topic_id == topic_id,
+        )
+    )
+    if require_completed and (not progress or progress.status != "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail="Complete the learning activity before starting its assessment",
+        )
+    return learner, topic, path, progress
+
+
+def _public_response(
+    assessment: Assessment, topic: Topic, source: str
+) -> AssessmentGenerateResponse:
+    question_set = AssessmentQuestionSet.model_validate({"questions": assessment.questions_json})
+    return AssessmentGenerateResponse(
+        assessment_id=assessment.id,
+        learner_id=assessment.learner_id,
+        topic_id=topic.id,
+        topic_title=topic.title,
+        status="submitted" if assessment.completed_at else "pending",
+        questions=[
+            AssessmentQuestionPublic(
+                question_id=question.question_id,
+                question=question.question,
+                options=question.options,
+                concept=question.concept,
+                difficulty=question.difficulty,
+            )
+            for question in question_set.questions
+        ],
+        source=source,
+    )
+
+
+def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -> AssessmentResultResponse:
+    question_by_id = {question["question_id"]: question for question in assessment.questions_json}
+    concept_state: dict[str, dict[str, int]] = {}
+    for answer in assessment.answers_json:
+        question = question_by_id[answer["question_id"]]
+        result = concept_state.setdefault(question["concept"], {"correct": 0, "total": 0})
+        result["correct"] += int(answer["is_correct"])
+        result["total"] += 1
+    concept_results = []
+    weak = []
+    strong = []
+    for concept, result in concept_state.items():
+        score = result["correct"] / result["total"]
+        level = classify_score(score)
+        concept_results.append(
+            ConceptResult(
+                concept=concept,
+                correct_count=result["correct"],
+                total_questions=result["total"],
+                score=round(score, 3),
+                percentage=round(score * 100),
+                level=level,
+            )
+        )
+        if level == "weak":
+            weak.append(concept)
+        elif level == "strong":
+            strong.append(concept)
+    recommendation = database.scalar(
+        select(Recommendation)
+        .where(Recommendation.learner_id == assessment.learner_id)
+        .order_by(Recommendation.created_at.desc())
+    )
+    target_topic = database.get(Topic, recommendation.topic_id) if recommendation and recommendation.topic_id else None
+    action_type = recommendation.action_type if recommendation else "continue"
+    summary = recommendation.reason if recommendation else "Assessment result saved."
+    next_action = (
+        "Review the weak concepts and reassess before continuing."
+        if action_type == "remediate"
+        else "Review focused examples before continuing."
+        if action_type == "practice"
+        else "Continue to the next recommended topic."
+    )
+    return AssessmentResultResponse(
+        assessment_id=assessment.id,
+        learner_id=assessment.learner_id,
+        topic_id=topic.id,
+        topic_title=topic.title,
+        score=round((assessment.score or 0) * len(assessment.questions_json)),
+        percentage=round((assessment.score or 0) * 100, 1),
+        correct_count=round((assessment.score or 0) * len(assessment.questions_json)),
+        total_questions=len(assessment.questions_json),
+        concept_results=concept_results,
+        weak_concepts=weak,
+        strong_concepts=strong,
+        recommendation=RecommendationResponse(
+            action_type=action_type,
+            target_topic_id=recommendation.topic_id if recommendation else None,
+            target_topic_title=target_topic.title if target_topic else None,
+            summary=summary,
+            next_action=next_action,
+            remediation=(
+                "Review the weak concept using a simpler analogy and targeted practice."
+                if action_type in {"remediate", "practice"}
+                else None
+            ),
+        ),
+    )
+
+
+@router.post("/topics/{topic_id}/assessment/generate", response_model=AssessmentGenerateResponse)
+def generate_topic_assessment(
+    learner_id: int, topic_id: str, database: Session = Depends(get_db)
+) -> AssessmentGenerateResponse:
+    learner, topic, _, _ = _get_assessment_context(learner_id, topic_id, database)
+    question_set, source = generate_assessment_questions(topic, learner)
+    assessment = Assessment(
+        learner_id=learner_id,
+        topic_id=topic_id,
+        assessment_type="topic",
+        questions_json=[question.model_dump() for question in question_set.questions],
+    )
+    database.add(assessment)
+    database.commit()
+    database.refresh(assessment)
+    return _public_response(assessment, topic, source)
+
+
+@router.get(
+    "/assessments/{assessment_id}",
+    response_model=AssessmentGenerateResponse | AssessmentResultResponse,
+)
+def get_assessment(
+    learner_id: int, assessment_id: int, database: Session = Depends(get_db)
+) -> AssessmentGenerateResponse | AssessmentResultResponse:
+    assessment = database.scalar(
+        select(Assessment).where(
+            Assessment.id == assessment_id,
+            Assessment.learner_id == learner_id,
+            Assessment.assessment_type == "topic",
+        )
+    )
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    topic = database.get(Topic, assessment.topic_id) if assessment.topic_id else None
+    if not topic:
+        raise HTTPException(status_code=500, detail="Assessment topic is unavailable")
+    if assessment.completed_at:
+        return _persisted_result(assessment, topic, database)
+    return _public_response(assessment, topic, "curated_fallback")
+
+
+@router.post("/assessments/{assessment_id}/submit", response_model=AssessmentResultResponse)
+def submit_assessment(
+    learner_id: int,
+    assessment_id: int,
+    payload: AssessmentSubmitRequest,
+    database: Session = Depends(get_db),
+) -> AssessmentResultResponse:
+    assessment = database.scalar(
+        select(Assessment).where(
+            Assessment.id == assessment_id,
+            Assessment.learner_id == learner_id,
+            Assessment.assessment_type == "topic",
+        )
+    )
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if assessment.completed_at:
+        raise HTTPException(status_code=409, detail="Assessment is already submitted")
+    learner, topic, _, _ = _get_assessment_context(learner_id, assessment.topic_id, database, False)
+    try:
+        question_set = AssessmentQuestionSet.model_validate({"questions": assessment.questions_json})
+        return apply_assessment_result(database, assessment, learner, topic, question_set, payload.answers)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error

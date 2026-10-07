@@ -168,3 +168,90 @@ class LearningContentResponse(BaseModel):
     content: LearningContent
     source: Literal["openrouter", "curated_fallback"]
     topic_status: Literal["in_progress", "completed", "pending", "remediation"]
+
+
+class AssessmentQuestion(BaseModel):
+    question_id: str = Field(min_length=2, max_length=80)
+    question: str = Field(min_length=10, max_length=700)
+    options: list[str] = Field(min_length=3, max_length=5)
+    concept: str = Field(min_length=2, max_length=100)
+    difficulty: Literal["beginner", "intermediate", "advanced"]
+    correct_option: int = Field(ge=0)
+    explanation: str = Field(min_length=5, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_correct_option(self) -> "AssessmentQuestion":
+        if self.correct_option >= len(self.options):
+            raise ValueError("correct_option must reference an available option")
+        return self
+
+
+class AssessmentQuestionSet(BaseModel):
+    questions: list[AssessmentQuestion] = Field(min_length=3, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_question_set(self) -> "AssessmentQuestionSet":
+        question_ids = [question.question_id for question in self.questions]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("Assessment question IDs must be unique")
+        return self
+
+
+class AssessmentQuestionPublic(BaseModel):
+    question_id: str
+    question: str
+    options: list[str]
+    concept: str
+    difficulty: Literal["beginner", "intermediate", "advanced"]
+
+
+class AssessmentGenerateResponse(BaseModel):
+    assessment_id: int
+    learner_id: int
+    topic_id: str
+    topic_title: str
+    status: Literal["pending", "submitted"]
+    questions: list[AssessmentQuestionPublic]
+    source: Literal["openrouter", "curated_fallback"]
+
+
+class AssessmentAnswer(BaseModel):
+    question_id: str = Field(min_length=2, max_length=80)
+    selected_option: int = Field(ge=0)
+
+
+class AssessmentSubmitRequest(BaseModel):
+    answers: list[AssessmentAnswer] = Field(min_length=1, max_length=8)
+
+
+class ConceptResult(BaseModel):
+    concept: str
+    correct_count: int
+    total_questions: int
+    score: float
+    percentage: int
+    level: Literal["weak", "developing", "strong"]
+
+
+class RecommendationResponse(BaseModel):
+    action_type: Literal["remediate", "practice", "continue", "reassess"]
+    target_topic_id: str | None
+    target_topic_title: str | None
+    summary: str
+    next_action: str
+    remediation: str | None
+
+
+class AssessmentResultResponse(BaseModel):
+    assessment_id: int
+    learner_id: int
+    topic_id: str
+    topic_title: str
+    score: int
+    percentage: float
+    correct_count: int
+    total_questions: int
+    concept_results: list[ConceptResult]
+    weak_concepts: list[str]
+    strong_concepts: list[str]
+    recommendation: RecommendationResponse

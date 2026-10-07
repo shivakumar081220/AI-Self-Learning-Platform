@@ -922,6 +922,147 @@ pre {
   padding-top: 4px;
 }
 
+.post-learning-assessment {
+  padding-top: 72px;
+}
+
+.assessment-result-shell {
+  width: min(1040px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 72px 0 96px;
+}
+
+.result-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 200px;
+  gap: 34px;
+  align-items: end;
+  padding-bottom: 48px;
+  border-bottom: 1px solid #cbd5c9;
+}
+
+.result-heading h1 {
+  font-size: clamp(3.1rem, 6vw, 5.8rem);
+}
+
+.result-heading .hero-copy {
+  margin-bottom: 0;
+}
+
+.result-score {
+  padding-left: 22px;
+  border-left: 1px solid #a9b6a8;
+}
+
+.result-score strong,
+.result-score span {
+  display: block;
+}
+
+.result-score strong {
+  color: #9a6a42;
+  font-size: 4rem;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.result-score span {
+  margin-top: 8px;
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.9fr);
+  gap: 54px;
+  padding: 46px 0;
+  border-bottom: 1px solid #cbd5c9;
+}
+
+.result-grid h2 {
+  margin: 0 0 24px;
+  color: #17211b;
+  font-size: 1.35rem;
+  font-weight: 500;
+}
+
+.result-concept {
+  margin-bottom: 20px;
+}
+
+.result-concept > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+  color: #536058;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.78rem;
+  text-transform: capitalize;
+}
+
+.result-concept strong {
+  color: #17211b;
+}
+
+.result-concept p {
+  margin: 7px 0 0;
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
+.adaptation-card {
+  padding: 26px;
+  border: 1px solid #58735d;
+  background: #e5ede1;
+}
+
+.adaptation-card.remediate {
+  border-color: #a3553b;
+  background: #f3e3dc;
+}
+
+.adaptation-card.practice {
+  border-color: #c7955e;
+  background: #f0eadb;
+}
+
+.adaptation-card h2 {
+  margin-bottom: 14px;
+  text-transform: capitalize;
+}
+
+.adaptation-card p:not(.eyebrow),
+.adaptation-card > strong {
+  display: block;
+  color: #536058;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.adaptation-card > strong {
+  margin-top: 18px;
+  color: #17211b;
+}
+
+.adaptation-card blockquote {
+  margin-bottom: 0;
+  font-size: 0.95rem;
+}
+
+.result-actions {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding-top: 28px;
+}
+
 @media (max-width: 720px) {
   .hero-shell {
     grid-template-columns: 1fr;
@@ -980,6 +1121,41 @@ pre {
   .lesson-shell {
     width: min(100% - 28px, 620px);
     padding: 44px 0 60px;
+  }
+
+  .post-learning-assessment {
+    padding-top: 44px;
+  }
+
+  .assessment-result-shell {
+    width: min(100% - 28px, 620px);
+    padding: 44px 0 60px;
+  }
+
+  .result-heading {
+    display: block;
+    padding-bottom: 34px;
+  }
+
+  .result-score {
+    margin-top: 28px;
+    padding: 18px 0 0;
+    border-top: 1px solid #a9b6a8;
+    border-left: 0;
+  }
+
+  .result-grid {
+    display: block;
+    padding: 34px 0;
+  }
+
+  .adaptation-card {
+    margin-top: 34px;
+  }
+
+  .result-actions {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .lesson-heading {
