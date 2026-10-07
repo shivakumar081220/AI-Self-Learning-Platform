@@ -248,7 +248,25 @@ CURATED_CONTENT: dict[str, dict[str, Any]] = {
 
 
 def _fallback_content(topic: Topic, learner: Learner, weak_concepts: list[str]) -> LearningContent:
-    data = CURATED_CONTENT.get("ai-foundations", {}) | CURATED_CONTENT.get(topic.id, {})
+    data = CURATED_CONTENT.get(topic.id)
+    if not data:
+        data = {
+            "overview": topic.description,
+            "learning_objectives": [
+                f"Explain the core ideas in {topic.title}",
+                "Apply the topic in a Generative AI workflow",
+            ],
+            "explanation": f"This lesson introduces {topic.title}. Start with the concepts {', '.join(topic.concept_tags)} and connect them to the goal of {learner.goal_text}.",
+            "key_concepts": (topic.concept_tags[:6] + ["application practice"])[:6] if topic.concept_tags else [topic.title, "application practice"],
+            "examples": [f"Use {topic.title} as one step in a small AI application aligned to your goal."],
+            "practical_example": f"Design a small exercise that applies {topic.title} to {learner.goal_text}.",
+            "common_mistakes": ["Skipping the topic prerequisites", "Treating a model output as automatically correct"],
+            "quick_recap": [f"{topic.title} is part of your generated curriculum.", "Validate outputs and connect practice to your goal."],
+            "analogy": f"Think of {topic.title} as a building block in the larger system you are learning to design.",
+            "important_notes": ["This is deterministic fallback material because the AI provider was unavailable."],
+        }
+    else:
+        data = data.copy()
     explanation = data["explanation"]
     if weak_concepts:
         explanation += " This review gives extra attention to " + ", ".join(

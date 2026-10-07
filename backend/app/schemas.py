@@ -7,6 +7,39 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 ExperienceLevel = Literal["beginner", "intermediate", "advanced"]
 
 
+class RegisterRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=5, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if "@" not in value or "." not in value.rsplit("@", 1)[-1]:
+            raise ValueError("Enter a valid email address")
+        return value
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    is_active: bool
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
 class GoalOption(BaseModel):
     key: str
     label: str
@@ -18,6 +51,8 @@ class LearnerCreate(BaseModel):
     experience_level: ExperienceLevel
     goal_key: str | None = None
     custom_goal: str | None = Field(default=None, max_length=240)
+    preferred_learning_style: str | None = Field(default=None, max_length=80)
+    target_outcome: str | None = Field(default=None, max_length=240)
 
     @field_validator("name", "custom_goal", mode="before")
     @classmethod
@@ -40,6 +75,45 @@ class LearnerResponse(BaseModel):
     goal_text: str
     track: str
     created_at: datetime
+
+
+class CurriculumTopic(BaseModel):
+    title: str = Field(min_length=3, max_length=160)
+    description: str = Field(min_length=20, max_length=800)
+    learning_objectives: list[str] = Field(min_length=2, max_length=6)
+    difficulty: ExperienceLevel
+    concepts: list[str] = Field(min_length=1, max_length=8)
+    prerequisites: list[str] = Field(default_factory=list, max_length=8)
+    estimated_minutes: int = Field(ge=10, le=240)
+
+
+class GeneratedCurriculum(BaseModel):
+    course_title: str = Field(min_length=5, max_length=200)
+    description: str = Field(min_length=20, max_length=800)
+    goal: str = Field(min_length=3, max_length=240)
+    level: ExperienceLevel
+    estimated_duration: str = Field(min_length=3, max_length=80)
+    topics: list[CurriculumTopic] = Field(min_length=3, max_length=12)
+
+    @model_validator(mode="after")
+    def validate_prerequisites(self) -> "GeneratedCurriculum":
+        titles = {topic.title for topic in self.topics}
+        if len(titles) != len(self.topics):
+            raise ValueError("Curriculum topic titles must be unique")
+        if any(prerequisite not in titles for topic in self.topics for prerequisite in topic.prerequisites):
+            raise ValueError("Curriculum prerequisites must reference generated topics")
+        return self
+
+
+class CurriculumResponse(BaseModel):
+    course_id: int
+    course_title: str
+    description: str
+    goal: str
+    level: ExperienceLevel
+    estimated_duration: str
+    topics: list[dict]
+    source: Literal["openrouter", "deterministic_fallback", "persisted"]
 
 
 class DiagnosticQuestion(BaseModel):

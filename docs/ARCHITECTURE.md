@@ -3,13 +3,15 @@
 ## System flow
 
 ```text
-React + Vite
+Public React + Vite
     |
-    | REST/JSON
+    | JWT bearer REST/JSON
     v
-FastAPI routers
+FastAPI auth and protected routers
     |
-    +--> Deterministic adaptive engine
+    +--> User -> LearnerProfile -> GeneratedCourse -> GeneratedTopic
+    |        |
+    |        +--> Deterministic adaptive engine
     |        |
     |        +--> SQLAlchemy / SQLite learner state
     |
@@ -21,6 +23,8 @@ FastAPI routers
 ```
 
 ## Frontend
+
+Public routes provide landing, registration, and login. Authenticated routes are guarded by the React auth context and redirect unauthenticated users to login. The short-lived access token is restored on refresh and removed on logout.
 
 The React application presents one learner journey:
 
@@ -36,6 +40,8 @@ Routes call the FastAPI API through `frontend/src/api/client.js`. Loading, empty
 
 ## Backend
 
+Registration hashes passwords with bcrypt. Login issues an expiring JWT signed with `JWT_SECRET_KEY`. A reusable FastAPI dependency validates the token and loads the account. Ownership checks prevent cross-user access to learner profiles, courses, progress, assessments, weaknesses, and recommendations.
+
 FastAPI routers own HTTP validation and learner/topic ownership checks. Services own domain behavior:
 
 - `diagnostic_service.py`: diagnostic question generation and fallback
@@ -46,7 +52,7 @@ FastAPI routers own HTTP validation and learner/topic ownership checks. Services
 
 ## Data flow
 
-Learner profile and goal are stored first. Diagnostic answers create an `Assessment` record and concept-level `SkillScore` records. The path engine reads those scores, topic prerequisites, goal relevance, progress, and assessment history to persist a `LearningPath`.
+An authenticated learner profile and goal are stored first. OpenRouter generates a validated course structure; the backend assigns generated topic IDs, persists `GeneratedCourse` and owned `Topic` rows, and writes generated prerequisite edges. Diagnostic answers create an `Assessment` record and concept-level `SkillScore` records. The path engine reads the learner's owned topics, prerequisites, scores, progress, and assessment history to persist a `LearningPath`.
 
 Opening a current topic creates or updates `TopicProgress`. Completing the topic starts a topic assessment. Submission stores answers and score, updates skill evidence, creates or resolves `Weakness` records, stores a `Recommendation`, and updates the current path position. Refreshing any later page reads that state from SQLite.
 
@@ -64,4 +70,4 @@ FastAPI
             +--> curated fallback if invalid/unavailable
 ```
 
-The model never owns scores, permissions, prerequisites, topic selection, progress, weakness status, or recommendations. Those decisions remain deterministic and testable in the backend.
+The model never owns authentication, scores, permissions, prerequisites, topic selection, progress, weakness status, or recommendations. Those decisions remain deterministic and testable in the backend. Legacy unowned prototype learners remain compatible; authenticated learners use their persisted generated curriculum.

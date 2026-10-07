@@ -15,17 +15,20 @@ from ..schemas import (
 )
 from ..services.assessment_result_service import apply_assessment_result, classify_score
 from ..services.assessment_service import generate_assessment_questions
+from ..models import User
+from ..security import ensure_learner_access, get_optional_user
 
 
 router = APIRouter(prefix="/api/learners/{learner_id}", tags=["assessment"])
 
 
 def _get_assessment_context(
-    learner_id: int, topic_id: str, database: Session, require_completed: bool = True
+    learner_id: int, topic_id: str, database: Session, require_completed: bool = True, user: User | None = None
 ) -> tuple[Learner, Topic, LearningPath, TopicProgress]:
     learner = database.get(Learner, learner_id)
     if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     topic = database.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found in curated catalog")
@@ -146,9 +149,9 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
 
 @router.post("/topics/{topic_id}/assessment/generate", response_model=AssessmentGenerateResponse)
 def generate_topic_assessment(
-    learner_id: int, topic_id: str, database: Session = Depends(get_db)
+    learner_id: int, topic_id: str, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> AssessmentGenerateResponse:
-    learner, topic, _, _ = _get_assessment_context(learner_id, topic_id, database)
+    learner, topic, _, _ = _get_assessment_context(learner_id, topic_id, database, user=user)
     question_set, source = generate_assessment_questions(topic, learner)
     assessment = Assessment(
         learner_id=learner_id,
@@ -167,7 +170,7 @@ def generate_topic_assessment(
     response_model=AssessmentGenerateResponse | AssessmentResultResponse,
 )
 def get_assessment(
-    learner_id: int, assessment_id: int, database: Session = Depends(get_db)
+    learner_id: int, assessment_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> AssessmentGenerateResponse | AssessmentResultResponse:
     assessment = database.scalar(
         select(Assessment).where(
@@ -178,6 +181,8 @@ def get_assessment(
     )
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
+    learner = database.get(Learner, learner_id)
+    ensure_learner_access(learner, user)
     topic = database.get(Topic, assessment.topic_id) if assessment.topic_id else None
     if not topic:
         raise HTTPException(status_code=500, detail="Assessment topic is unavailable")
@@ -192,6 +197,7 @@ def submit_assessment(
     assessment_id: int,
     payload: AssessmentSubmitRequest,
     database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
 ) -> AssessmentResultResponse:
     assessment = database.scalar(
         select(Assessment).where(
@@ -204,7 +210,7 @@ def submit_assessment(
         raise HTTPException(status_code=404, detail="Assessment not found")
     if assessment.completed_at:
         raise HTTPException(status_code=409, detail="Assessment is already submitted")
-    learner, topic, _, _ = _get_assessment_context(learner_id, assessment.topic_id, database, False)
+    learner, topic, _, _ = _get_assessment_context(learner_id, assessment.topic_id, database, False, user)
     try:
         question_set = AssessmentQuestionSet.model_validate({"questions": assessment.questions_json})
         return apply_assessment_result(database, assessment, learner, topic, question_set, payload.answers)

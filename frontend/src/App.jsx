@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { useAuth } from "./auth";
 
 import {
   createLearner,
@@ -12,6 +13,8 @@ import {
   getGoals,
   getLearningPath,
   getLearnerSummary,
+  getMyLearner,
+  generateMyCurriculum,
   getSkillAnalysis,
   regenerateLearningPath,
   submitAssessment,
@@ -38,9 +41,7 @@ function HomePage() {
           A diagnostic-first learning experience that adjusts to your strengths,
           gaps, and assessment results.
         </p>
-        <Link className="primary-button" to="/profile">
-          Start learner profile
-        </Link>
+        <div className="hero-actions"><Link className="primary-button" to="/register">Get started</Link><Link className="text-link" to="/login">Log in</Link></div>
       </section>
       <section className="journey-panel" aria-label="Learning journey">
         <p className="section-label">Your adaptive journey</p>
@@ -55,6 +56,54 @@ function HomePage() {
       </section>
     </main>
   );
+}
+
+function ProtectedRoute({ children }) {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) return <main className="center-state"><span className="loading-mark">● ● ●</span><p>Restoring your session...</p></main>;
+  return isAuthenticated ? children : <Navigate to="/login" replace />;
+}
+
+function LoginPage() {
+  const navigate = useNavigate();
+  const { login } = useAuth();
+  const [form, setForm] = useState({ email: "", password: "" });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event) {
+    event.preventDefault(); setError(""); setBusy(true);
+    try { await login(form); navigate("/dashboard"); } catch (requestError) { setError(requestError.message); } finally { setBusy(false); }
+  }
+  return <div className="app-shell"><main className="auth-shell"><p className="eyebrow">Welcome back</p><h1>Return to your learning.</h1><form className="auth-form" onSubmit={submit}><label className="field-label" htmlFor="login-email">Email</label><input id="login-email" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required /><label className="field-label" htmlFor="login-password">Password</label><input id="login-password" type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} required /><ErrorMessage message={error} /><button className="primary-button" disabled={busy} type="submit">{busy ? "Logging in..." : "Log in"}</button><Link className="text-link" to="/register">Create an account</Link></form></main></div>;
+}
+
+function RegisterPage() {
+  const navigate = useNavigate();
+  const { register } = useAuth();
+  const [form, setForm] = useState({ name: "", email: "", password: "", confirmPassword: "" });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event) {
+    event.preventDefault(); setError("");
+    if (form.password !== form.confirmPassword) { setError("Passwords do not match."); return; }
+    setBusy(true);
+    try { await register(form); navigate("/profile"); } catch (requestError) { setError(requestError.message); } finally { setBusy(false); }
+  }
+  return <div className="app-shell"><main className="auth-shell"><p className="eyebrow">Create your account</p><h1>Build your learning space.</h1><form className="auth-form" onSubmit={submit}><label className="field-label" htmlFor="register-name">Name</label><input id="register-name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required /><label className="field-label" htmlFor="register-email">Email</label><input id="register-email" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required /><label className="field-label" htmlFor="register-password">Password</label><input id="register-password" type="password" minLength="8" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} required /><label className="field-label" htmlFor="register-confirm">Confirm password</label><input id="register-confirm" type="password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} required /><ErrorMessage message={error} /><button className="primary-button" disabled={busy} type="submit">{busy ? "Creating account..." : "Create account"}</button><Link className="text-link" to="/login">Already have an account?</Link></form></main></div>;
+}
+
+function DashboardPage() {
+  const navigate = useNavigate();
+  const { logout } = useAuth();
+  const [learner, setLearner] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [curriculum, setCurriculum] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => { getMyLearner().then((profile) => { setLearner(profile); return Promise.all([getLearnerSummary(profile.id), getMyCurriculum().catch(() => null)]); }).then((result) => { if (result) { setSummary(result[0]); setCurriculum(result[1]); } }).catch((requestError) => setError(requestError.message)); }, []);
+  function signOut() { logout(); navigate("/", { replace: true }); }
+  if (error) return <div className="app-shell"><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to="/profile">Complete onboarding</Link></main></div>;
+  if (!learner) return <main className="center-state"><span className="loading-mark">● ● ●</span><p>Loading your learning space...</p></main>;
+  return <div className="app-shell"><header className="dashboard-header"><Link className="brand-link" to="/">Adaptive AI</Link><nav><Link to="/dashboard">Dashboard</Link><Link to={`/learning-path/${learner.id}`}>My learning</Link><Link to="/profile">Profile</Link><button className="text-button" onClick={signOut} type="button">Log out</button></nav></header><main className="dashboard-shell"><p className="eyebrow">Your learning space</p><h1>Welcome, {learner.name}.</h1>{curriculum && <section className="course-banner"><div><p className="eyebrow">Current course</p><h2>{curriculum.course_title}</h2><p>{curriculum.description}</p></div><span>{curriculum.topics.length} topics</span></section>}<section className="dashboard-grid"><div><p className="eyebrow">Progress</p><strong className="dashboard-number">{summary?.progress_percentage || 0}%</strong><p>path completed</p></div><div><p className="eyebrow">Current topic</p><strong>{summary?.current_topic_title || "Ready to begin"}</strong><p>{summary?.recommendation?.summary || "Your next recommendation will appear here."}</p></div><div><p className="eyebrow">Skill readiness</p><strong className="dashboard-number">{summary?.overall_skill_percentage || 0}%</strong><p>across recorded concepts</p></div></section><div className="dashboard-actions"><Link className="primary-button" to={`/learning-path/${learner.id}`}>{summary?.current_topic_id ? "Continue learning" : "Open my learning"}</Link><button className="secondary-button" onClick={signOut} type="button">Log out</button></div></main></div>;
 }
 
 function ProgressHeader({ activeStep }) {
@@ -84,6 +133,7 @@ function ErrorMessage({ message }) {
 
 function ProfilePage() {
   const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
   const [goals, setGoals] = useState([]);
   const [form, setForm] = useState({ name: "", experience_level: "beginner", goal_key: "", custom_goal: "" });
   const [isCustomGoal, setIsCustomGoal] = useState(false);
@@ -113,6 +163,7 @@ function ProfilePage() {
         goal_key: isCustomGoal ? null : form.goal_key,
         custom_goal: isCustomGoal ? form.custom_goal : null,
       });
+      await generateMyCurriculum();
       navigate(`/diagnostic/${learner.id}`);
     } catch (requestError) {
       setError(requestError.message);
@@ -503,12 +554,15 @@ function App() {
   return (
     <Routes>
       <Route path="/" element={<HomePage />} />
-      <Route path="/profile" element={<ProfilePage />} />
-      <Route path="/diagnostic/:learnerId" element={<DiagnosticPage />} />
-      <Route path="/analysis/:learnerId" element={<AnalysisPage />} />
-      <Route path="/learning-path/:learnerId" element={<LearningPathPage />} />
-      <Route path="/learn/:learnerId" element={<LearningExperiencePage />} />
-      <Route path="/assessment/:learnerId/:assessmentId" element={<AssessmentPage />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
+      <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
+      <Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+      <Route path="/diagnostic/:learnerId" element={<ProtectedRoute><DiagnosticPage /></ProtectedRoute>} />
+      <Route path="/analysis/:learnerId" element={<ProtectedRoute><AnalysisPage /></ProtectedRoute>} />
+      <Route path="/learning-path/:learnerId" element={<ProtectedRoute><LearningPathPage /></ProtectedRoute>} />
+      <Route path="/learn/:learnerId" element={<ProtectedRoute><LearningExperiencePage /></ProtectedRoute>} />
+      <Route path="/assessment/:learnerId/:assessmentId" element={<ProtectedRoute><AssessmentPage /></ProtectedRoute>} />
     </Routes>
   );
 }

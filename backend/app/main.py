@@ -4,13 +4,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import models
-from .database import Base, SessionLocal, engine
+from .database import Base, SessionLocal, ensure_legacy_columns, engine
 from .seed_topics import seed_topics
-from .routers import assessment, diagnostic, learning, learning_path, learners
+from .routers import assessment, auth, curriculum, diagnostic, learning, learning_path, learners
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    ensure_legacy_columns()
     Base.metadata.create_all(bind=engine)
     database = SessionLocal()
     try:
@@ -29,12 +30,15 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost):517[0-9]$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(learners.router)
+app.include_router(auth.router)
+app.include_router(curriculum.router)
 app.include_router(diagnostic.router)
 app.include_router(learning_path.router)
 app.include_router(learning.router)

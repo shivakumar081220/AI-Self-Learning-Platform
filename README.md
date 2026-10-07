@@ -2,7 +2,7 @@
 
 AI-powered adaptive learning platform for the Generative AI track.
 
-## Phase 1 through Phase 7 status
+## Phase 1 through Phase 9 status
 
 This repository currently contains the project foundation and database catalog:
 
@@ -30,6 +30,10 @@ This repository currently contains the project foundation and database catalog:
 - Post-learning MCQ assessment tied to the completed topic
 - Deterministic concept scoring, weakness detection, skill updates, and adaptive remediation
 - Assessment result UI that makes the changed recommendation visible
+- Secure registration, bcrypt password hashing, JWT login, logout, and session restoration
+- Authenticated learner ownership and cross-user data isolation
+- AI-generated persisted per-learner curriculum with generated topics and prerequisites
+- Resume dashboard for course, path, progress, skills, assessments, and recommendations
 
 The catalog currently contains nine Generative AI topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems.
 
@@ -119,6 +123,20 @@ python -m pytest backend/tests -q
 
 Copy `.env.example` to `.env` when configuring local development. Never commit `.env` or API keys.
 
+Authentication also requires a strong local `JWT_SECRET_KEY`. The backend intentionally refuses authenticated operations when it is missing instead of using an insecure default:
+
+```text
+JWT_SECRET_KEY=replace_with_a_long_random_local_secret
+```
+
+The existing workspace `.env.example` is intentionally not modified by Phase 9.
+
+## Authentication and generated curriculum
+
+Unauthenticated users see the landing, login, and registration pages. Authenticated routes require a bearer JWT. Passwords are bcrypt-hashed and never returned. Each account owns its learner profile, generated course, topics, path, progress, skills, assessments, weaknesses, and recommendations. Protected routes verify ownership before returning learner data.
+
+After onboarding, OpenRouter generates a Pydantic-validated course structure. The backend assigns application-generated topic IDs, persists the course and prerequisite graph, and loads that same course after logout/login. When OpenRouter is unavailable, a deterministic goal-specific fallback is persisted per learner; the old global catalog is not the normal authenticated curriculum source.
+
 ## Planned MVP journey
 
 Learner Profile -> AI Goal Selection -> Diagnostic Assessment -> Skill Analysis -> Personalized Learning Path -> AI Learning Content -> Assessment -> Weakness Detection -> Adaptive Remediation or Recommendation.
@@ -181,6 +199,13 @@ The frontend is normally available at `http://127.0.0.1:5173`; the API is at `ht
 ## API overview
 
 - `POST /api/learners`: create a learner and goal
+- `POST /api/auth/register`: create an account and return a short-lived JWT
+- `POST /api/auth/login`: authenticate and return a JWT
+- `GET /api/auth/me`: restore the authenticated account
+- `GET /api/learners/me`: load the authenticated learner profile
+- `PUT /api/learners/me`: safely update the authenticated learner profile
+- `POST /api/curriculum/generate`: generate and persist the authenticated learner's course once
+- `GET /api/curriculum/current`: load the persisted authenticated course
 - `POST /api/learners/{id}/diagnostic/generate`: generate diagnostic MCQs
 - `POST /api/learners/{id}/diagnostic/{assessment_id}/submit`: score diagnostic answers
 - `GET /api/learners/{id}/summary`: persisted dashboard state
@@ -208,15 +233,15 @@ The application works without OpenRouter. Missing keys, provider failures, rate 
 
 ## Demo steps
 
-1. Open the frontend and create a learner profile.
-2. Select a Generative AI goal and experience level.
+1. Register and log in.
+2. Complete the learner profile and select a goal/level.
 3. Complete the diagnostic and inspect concept-level skill analysis.
-4. Open the personalized path and select the current topic.
-5. Read the personalized or curated learning content.
+4. Open the generated personalized path and current topic.
+5. Read AI content or deterministic fallback content.
 6. Mark the topic complete; the topic assessment opens automatically.
 7. Submit weak answers to demonstrate remediation, or correct answers to demonstrate progression.
 8. Inspect “What changed based on your result?” and the updated path/dashboard.
-9. Refresh the result or path page to demonstrate persisted learner state.
+9. Log out, log in again, and verify the same course and current state resume.
 
 ## Testing
 

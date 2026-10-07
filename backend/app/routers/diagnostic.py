@@ -13,6 +13,8 @@ from ..schemas import (
     DiagnosticSubmitResponse,
 )
 from ..services.diagnostic_service import generate_diagnostic, score_diagnostic
+from ..models import User
+from ..security import ensure_learner_access, get_optional_user
 from .learners import build_skill_analysis
 
 
@@ -21,11 +23,12 @@ router = APIRouter(prefix="/api/learners/{learner_id}/diagnostic", tags=["diagno
 
 @router.post("/generate", response_model=DiagnosticGenerateResponse)
 def generate_learner_diagnostic(
-    learner_id: int, database: Session = Depends(get_db)
+    learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> DiagnosticGenerateResponse:
     learner = database.get(Learner, learner_id)
     if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
 
     question_set, generated_by = generate_diagnostic(learner, database)
     assessment = Assessment(
@@ -56,9 +59,12 @@ def submit_learner_diagnostic(
     assessment_id: int,
     payload: DiagnosticSubmitRequest,
     database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
 ) -> DiagnosticSubmitResponse:
-    if not database.get(Learner, learner_id):
+    learner = database.get(Learner, learner_id)
+    if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
 
     assessment = database.scalar(
         select(Assessment).where(

@@ -15,6 +15,8 @@ from ..schemas import (
     LearnerSummaryResponse,
     RecommendationResponse,
 )
+from ..models import User
+from ..security import ensure_learner_access, get_optional_user, require_user
 
 
 router = APIRouter(prefix="/api", tags=["learners"])
@@ -62,17 +64,65 @@ def list_goals() -> list[GoalOption]:
     return GOAL_OPTIONS
 
 
+@router.get("/learners/me", response_model=LearnerResponse)
+def get_my_learner(user: User = Depends(require_user), database: Session = Depends(get_db)) -> Learner:
+    learner = database.scalar(select(Learner).where(Learner.user_id == user.id))
+    if not learner:
+        raise HTTPException(status_code=404, detail="Complete onboarding to create your learner profile.")
+    return learner
+
+
+@router.put("/learners/me", response_model=LearnerResponse)
+def update_my_learner(
+    payload: LearnerCreate,
+    user: User = Depends(require_user),
+    database: Session = Depends(get_db),
+) -> Learner:
+    learner = database.scalar(select(Learner).where(Learner.user_id == user.id))
+    if not learner:
+        raise HTTPException(status_code=404, detail="Learner profile not found")
+    if payload.goal_key and payload.goal_key not in GOAL_BY_KEY:
+        raise HTTPException(status_code=422, detail="Unknown Generative AI learning goal")
+    learner.name = payload.name
+    learner.experience_level = payload.experience_level
+    learner.goal_text = payload.custom_goal or GOAL_BY_KEY[payload.goal_key].label
+    learner.preferred_learning_style = payload.preferred_learning_style
+    learner.target_outcome = payload.target_outcome
+    database.commit()
+    database.refresh(learner)
+    return learner
+
+
 @router.post("/learners", response_model=LearnerResponse, status_code=status.HTTP_201_CREATED)
-def create_learner(payload: LearnerCreate, database: Session = Depends(get_db)) -> Learner:
+def create_learner(
+    payload: LearnerCreate,
+    database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+) -> Learner:
     if payload.goal_key and payload.goal_key not in GOAL_BY_KEY:
         raise HTTPException(status_code=422, detail="Unknown Generative AI learning goal")
 
     selected_goal = payload.custom_goal or GOAL_BY_KEY[payload.goal_key].label
+    if user:
+        existing = database.scalar(select(Learner).where(Learner.user_id == user.id))
+        if existing:
+            ensure_learner_access(existing, user)
+            existing.name = payload.name
+            existing.experience_level = payload.experience_level
+            existing.goal_text = selected_goal
+            existing.preferred_learning_style = payload.preferred_learning_style
+            existing.target_outcome = payload.target_outcome
+            database.commit()
+            database.refresh(existing)
+            return existing
     learner = Learner(
+        user_id=user.id if user else None,
         name=payload.name,
         experience_level=payload.experience_level,
         goal_text=selected_goal,
         track="generative_ai",
+        preferred_learning_style=payload.preferred_learning_style,
+        target_outcome=payload.target_outcome,
     )
     learner.goals.append(
         LearningGoal(
@@ -88,19 +138,22 @@ def create_learner(payload: LearnerCreate, database: Session = Depends(get_db)) 
 
 
 @router.get("/learners/{learner_id}", response_model=LearnerResponse)
-def get_learner(learner_id: int, database: Session = Depends(get_db)) -> Learner:
+def get_learner(learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)) -> Learner:
     learner = database.get(Learner, learner_id)
     if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     return learner
 
 
 @router.get("/learners/{learner_id}/skills", response_model=SkillAnalysisResponse)
 def get_skill_analysis(
-    learner_id: int, database: Session = Depends(get_db)
+    learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> SkillAnalysisResponse:
-    if not database.get(Learner, learner_id):
+    learner = database.get(Learner, learner_id)
+    if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     skills = database.scalars(
         select(SkillScore).where(SkillScore.learner_id == learner_id)
     ).all()
@@ -109,11 +162,12 @@ def get_skill_analysis(
 
 @router.get("/learners/{learner_id}/summary", response_model=LearnerSummaryResponse)
 def get_learner_summary(
-    learner_id: int, database: Session = Depends(get_db)
+    learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> LearnerSummaryResponse:
     learner = database.get(Learner, learner_id)
     if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     analysis = build_skill_analysis(
         learner_id,
         database.scalars(select(SkillScore).where(SkillScore.learner_id == learner_id)).all(),

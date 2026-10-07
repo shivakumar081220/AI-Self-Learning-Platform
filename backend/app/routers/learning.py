@@ -9,6 +9,8 @@ from ..models import Learner, LearningPath, Topic, TopicProgress
 from ..schemas import CurrentTopicResponse, LearningContentResponse
 from ..services.content_service import generate_learning_content
 from ..services.path_engine import validate_path_payload
+from ..models import User
+from ..security import ensure_learner_access, get_optional_user
 
 
 router = APIRouter(prefix="/api/learners/{learner_id}", tags=["learning"])
@@ -59,11 +61,12 @@ def _progress_record(
 
 
 def _authorize_topic(
-    learner_id: int, topic_id: str, path: LearningPath, database: Session
+    learner_id: int, topic_id: str, path: LearningPath, database: Session, user: User | None
 ) -> tuple[Learner, Topic, TopicProgress | None, dict]:
     learner = database.get(Learner, learner_id)
     if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     topic = database.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found in curated catalog")
@@ -81,9 +84,15 @@ def _authorize_topic(
 
 
 @router.get("/learning-path/current", response_model=CurrentTopicResponse)
-def get_current_topic(learner_id: int, database: Session = Depends(get_db)) -> CurrentTopicResponse:
-    if not database.get(Learner, learner_id):
+def get_current_topic(
+    learner_id: int,
+    database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+) -> CurrentTopicResponse:
+    learner = database.get(Learner, learner_id)
+    if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     path = _latest_path(learner_id, database)
     current = _current_item(path)
     if not current:
@@ -120,10 +129,10 @@ def _content_response(
 
 @router.get("/topics/{topic_id}/content", response_model=LearningContentResponse)
 def get_topic_content(
-    learner_id: int, topic_id: str, database: Session = Depends(get_db)
+    learner_id: int, topic_id: str, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> LearningContentResponse:
     path = _latest_path(learner_id, database)
-    learner, topic, progress, _ = _authorize_topic(learner_id, topic_id, path, database)
+    learner, topic, progress, _ = _authorize_topic(learner_id, topic_id, path, database, user)
     if not progress:
         progress = _progress_record(learner_id, topic_id, database, create=True)
     elif progress.status == "pending":
@@ -135,17 +144,17 @@ def get_topic_content(
 
 @router.post("/topics/{topic_id}/content/generate", response_model=LearningContentResponse)
 def generate_topic_content(
-    learner_id: int, topic_id: str, database: Session = Depends(get_db)
+    learner_id: int, topic_id: str, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> LearningContentResponse:
-    return get_topic_content(learner_id, topic_id, database)
+    return get_topic_content(learner_id, topic_id, database, user)
 
 
 @router.post("/topics/{topic_id}/complete", response_model=CurrentTopicResponse)
 def complete_topic(
-    learner_id: int, topic_id: str, database: Session = Depends(get_db)
+    learner_id: int, topic_id: str, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> CurrentTopicResponse:
     path = _latest_path(learner_id, database)
-    learner, topic, progress, path_item = _authorize_topic(learner_id, topic_id, path, database)
+    learner, topic, progress, path_item = _authorize_topic(learner_id, topic_id, path, database, user)
     progress = progress or _progress_record(learner_id, topic_id, database, create=True)
     progress.status = "completed"
     progress.last_activity_at = datetime.utcnow()

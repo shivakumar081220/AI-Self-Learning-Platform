@@ -4,7 +4,13 @@ async function request(path, options = {}) {
   let response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: { "Content-Type": "application/json", ...options.headers },
+      headers: {
+        "Content-Type": "application/json",
+        ...(localStorage.getItem("adaptive_access_token")
+          ? { Authorization: `Bearer ${localStorage.getItem("adaptive_access_token")}` }
+          : {}),
+        ...options.headers,
+      },
       ...options,
     });
   } catch {
@@ -25,6 +31,30 @@ async function request(path, options = {}) {
 
 export function getGoals() {
   return request("/goals");
+}
+
+export function registerAccount(payload) {
+  return request("/auth/register", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function loginAccount(payload) {
+  return request("/auth/login", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function getCurrentUser() {
+  return request("/auth/me");
+}
+
+export function getMyLearner() {
+  return request("/learners/me");
+}
+
+export function generateMyCurriculum() {
+  return request("/curriculum/generate", { method: "POST" });
+}
+
+export function getMyCurriculum() {
+  return request("/curriculum/current");
 }
 
 export function createLearner(profile) {

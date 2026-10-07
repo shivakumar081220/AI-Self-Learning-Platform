@@ -6,6 +6,8 @@ from ..database import get_db
 from ..models import Learner, LearningPath, Topic, TopicProgress
 from ..schemas import LearningPathResponse
 from ..services.path_engine import generate_path_plan, path_response, validate_path_payload
+from ..models import User
+from ..security import ensure_learner_access, get_optional_user
 
 
 router = APIRouter(prefix="/api/learners/{learner_id}/learning-path", tags=["learning-path"])
@@ -91,10 +93,12 @@ def _persist_path(
 
 @router.get("", response_model=LearningPathResponse)
 def get_learning_path(
-    learner_id: int, database: Session = Depends(get_db)
+    learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> LearningPathResponse:
-    if not database.get(Learner, learner_id):
+    learner = database.get(Learner, learner_id)
+    if not learner:
         raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     path = database.scalar(
         select(LearningPath)
         .where(LearningPath.learner_id == learner_id)
@@ -105,13 +109,21 @@ def get_learning_path(
 
 @router.post("/generate", response_model=LearningPathResponse)
 def generate_learning_path(
-    learner_id: int, database: Session = Depends(get_db)
+    learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> LearningPathResponse:
+    learner = database.get(Learner, learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     return _persist_path(learner_id, database, False)
 
 
 @router.post("/regenerate", response_model=LearningPathResponse)
 def regenerate_learning_path(
-    learner_id: int, database: Session = Depends(get_db)
+    learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> LearningPathResponse:
+    learner = database.get(Learner, learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
     return _persist_path(learner_id, database, True)

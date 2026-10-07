@@ -157,8 +157,18 @@ def _topic_reason(
 
 
 def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
-    topics = database.scalars(select(Topic)).all()
-    relationships = database.scalars(select(TopicPrerequisite)).all()
+    if learner.user_id is not None:
+        topics = database.scalars(select(Topic).where(Topic.owner_user_id == learner.user_id)).all()
+        topic_ids = {topic.id for topic in topics}
+        relationships = database.scalars(
+            select(TopicPrerequisite).where(
+                TopicPrerequisite.topic_id.in_(topic_ids),
+                TopicPrerequisite.prerequisite_id.in_(topic_ids),
+            )
+        ).all()
+    else:
+        topics = database.scalars(select(Topic).where(Topic.owner_user_id.is_(None))).all()
+        relationships = database.scalars(select(TopicPrerequisite)).all()
     topic_by_id = validate_topic_graph(topics, relationships)
     prerequisites: dict[str, list[str]] = defaultdict(list)
     for relationship in relationships:
