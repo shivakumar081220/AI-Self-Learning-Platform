@@ -122,6 +122,408 @@ h1 {
   font-size: 0.9rem;
 }
 
+.app-shell {
+  min-height: 100vh;
+}
+
+.workflow-header {
+  width: min(1180px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 28px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid #d1d8cd;
+}
+
+.brand-link {
+  color: #17211b;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.track-label {
+  color: #7b887d;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.78rem;
+}
+
+.progress-track {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.progress-dot {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid #b5c0b4;
+  border-radius: 50%;
+  color: #8a968b;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.66rem;
+}
+
+.progress-dot.active {
+  border-color: #58735d;
+  background: #58735d;
+  color: #f4f0e7;
+}
+
+.progress-line {
+  width: 38px;
+  height: 1px;
+  background: #b5c0b4;
+}
+
+.form-shell,
+.assessment-shell,
+.analysis-shell {
+  width: min(1040px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 72px 0 96px;
+}
+
+.form-shell,
+.assessment-shell {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.8fr) minmax(0, 1.2fr);
+  gap: 72px;
+}
+
+.form-intro h1,
+.assessment-heading h1,
+.analysis-heading h1 {
+  font-size: clamp(3.1rem, 6vw, 5.8rem);
+}
+
+.profile-form,
+.question-list {
+  display: grid;
+  gap: 16px;
+}
+
+.field-label {
+  margin-top: 10px;
+  color: #435349;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+input:not([type="radio"]) {
+  width: 100%;
+  padding: 15px 0;
+  border: 0;
+  border-bottom: 1px solid #a9b6a8;
+  border-radius: 0;
+  outline: 0;
+  background: transparent;
+  color: #17211b;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.2rem;
+}
+
+input:not([type="radio"]):focus {
+  border-bottom-color: #58735d;
+}
+
+.choice-row {
+  display: flex;
+  gap: 8px;
+}
+
+.choice-button,
+.goal-card {
+  border: 1px solid #c2cdc0;
+  background: transparent;
+  color: #435349;
+  cursor: pointer;
+  text-align: left;
+}
+
+.choice-button {
+  padding: 10px 14px;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.8rem;
+  text-transform: capitalize;
+}
+
+.choice-button.selected,
+.choice-button:hover,
+.goal-card.selected,
+.goal-card:hover {
+  border-color: #58735d;
+  background: #e5ede1;
+}
+
+.goal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.goal-card {
+  min-height: 112px;
+  padding: 15px;
+}
+
+.goal-card strong,
+.goal-card span {
+  display: block;
+}
+
+.goal-card strong {
+  margin-bottom: 8px;
+  color: #17211b;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.88rem;
+}
+
+.goal-card span {
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.form-submit {
+  width: fit-content;
+  margin-top: 14px;
+  cursor: pointer;
+}
+
+.form-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.error-message {
+  margin: 8px 0;
+  padding: 12px 14px;
+  border-left: 3px solid #a3553b;
+  background: #f3e3dc;
+  color: #783c2c;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.center-state {
+  width: min(620px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 18vh 0;
+  text-align: center;
+}
+
+.loading-mark {
+  display: block;
+  margin-bottom: 18px;
+  color: #9a6a42;
+  font-family: "Trebuchet MS", sans-serif;
+  letter-spacing: 0.3em;
+}
+
+.center-state p,
+.progress-copy,
+.empty-copy {
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.9rem;
+}
+
+.assessment-heading {
+  position: sticky;
+  top: 20px;
+  align-self: start;
+}
+
+.question-progress,
+.skill-bar {
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  background: #dbe2d8;
+}
+
+.question-progress span,
+.skill-fill {
+  display: block;
+  height: 100%;
+  background: #9a6a42;
+  transition: width 260ms ease;
+}
+
+.progress-copy {
+  margin-top: 10px;
+  font-size: 0.76rem;
+}
+
+.question-list {
+  gap: 20px;
+}
+
+.question-card {
+  margin: 0;
+  padding: 22px;
+  border: 1px solid #cbd5c9;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.question-card legend {
+  width: 100%;
+  padding: 0;
+  color: #17211b;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.25rem;
+  line-height: 1.35;
+}
+
+.question-card legend span {
+  display: block;
+  margin-bottom: 12px;
+  color: #9a6a42;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.option-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid #d5ddd3;
+  color: #536058;
+  cursor: pointer;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.option.selected {
+  border-color: #58735d;
+  background: #e5ede1;
+  color: #17211b;
+}
+
+.option input {
+  accent-color: #58735d;
+  margin-top: 3px;
+}
+
+.analysis-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 30px;
+  align-items: end;
+  padding-bottom: 56px;
+}
+
+.analysis-heading .hero-copy {
+  margin-bottom: 0;
+}
+
+.score-display {
+  padding-left: 22px;
+  border-left: 1px solid #a9b6a8;
+}
+
+.score-display strong,
+.score-display span {
+  display: block;
+}
+
+.score-display strong {
+  color: #9a6a42;
+  font-size: 4rem;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.score-display span {
+  margin-top: 8px;
+  color: #738076;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 26px;
+  border-top: 1px solid #cbd5c9;
+  border-bottom: 1px solid #cbd5c9;
+  padding: 34px 0;
+}
+
+.analysis-column h2,
+.next-step-banner h2 {
+  margin: 0 0 26px;
+  color: #17211b;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.skill-row {
+  margin-bottom: 20px;
+}
+
+.skill-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+  color: #536058;
+  font-family: "Trebuchet MS", sans-serif;
+  font-size: 0.76rem;
+  text-transform: capitalize;
+}
+
+.skill-meta strong {
+  color: #17211b;
+}
+
+.skill-fill.strong { background: #58735d; }
+.skill-fill.developing { background: #c7955e; }
+.skill-fill.weak { background: #a3553b; }
+
+.next-step-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 30px;
+  padding: 24px 0;
+}
+
+.next-step-banner .eyebrow {
+  margin-bottom: 10px;
+}
+
+.next-step-banner h2 {
+  margin: 0;
+}
+
+.next-arrow {
+  color: #9a6a42;
+  font-size: 2.5rem;
+}
+
 @media (max-width: 720px) {
   .hero-shell {
     grid-template-columns: 1fr;
@@ -137,5 +539,58 @@ h1 {
     padding: 22px 0 0;
     border-top: 1px solid #a9b6a8;
     border-left: 0;
+  }
+
+  .workflow-header {
+    width: min(100% - 28px, 620px);
+    padding: 20px 0;
+  }
+
+  .track-label {
+    display: none;
+  }
+
+  .progress-line {
+    width: 18px;
+  }
+
+  .form-shell,
+  .assessment-shell,
+  .analysis-shell {
+    width: min(100% - 28px, 620px);
+    display: block;
+    padding: 44px 0 60px;
+  }
+
+  .form-intro,
+  .assessment-heading {
+    margin-bottom: 48px;
+  }
+
+  .goal-grid,
+  .analysis-grid,
+  .analysis-heading {
+    grid-template-columns: 1fr;
+  }
+
+  .analysis-heading {
+    display: block;
+    padding-bottom: 34px;
+  }
+
+  .score-display {
+    margin-top: 28px;
+    padding: 18px 0 0;
+    border-top: 1px solid #a9b6a8;
+    border-left: 0;
+  }
+
+  .analysis-column {
+    padding-bottom: 18px;
+  }
+
+  .analysis-column + .analysis-column {
+    border-top: 1px solid #d1d8cd;
+    padding-top: 28px;
   }
 }

@@ -2,7 +2,7 @@
 
 AI-powered adaptive learning platform for the Generative AI track.
 
-## Phase 1 and Phase 2 status
+## Phase 1, Phase 2, and Phase 3 status
 
 This repository currently contains the project foundation and database catalog:
 
@@ -13,9 +13,23 @@ This repository currently contains the project foundation and database catalog:
 - Curated Generative AI topic catalog with prerequisite relationships
 - Idempotent topic seeding during FastAPI startup
 - FastAPI health endpoint
-- Basic frontend routing shell
+- Learner profile and Generative AI goal-selection API and UI
+- OpenAI-backed, Pydantic-validated diagnostic generation with curated fallback
+- Deterministic MCQ scoring and concept-level skill analysis
+- SQLite persistence for diagnostic attempts and skill scores
+- Responsive profile, diagnostic, and analysis screens
 
 The catalog currently contains nine Generative AI topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems.
+
+## Phase 3 API
+
+- `GET /api/goals` returns the supported Generative AI goals.
+- `POST /api/learners` creates a learner profile and selected goal.
+- `POST /api/learners/{learner_id}/diagnostic/generate` creates a diagnostic MCQ assessment.
+- `POST /api/learners/{learner_id}/diagnostic/{assessment_id}/submit` scores answers and stores concept skills.
+- `GET /api/learners/{learner_id}/skills` returns strong, developing, weak, and individual concept scores.
+
+Diagnostic questions keep answer keys and concept metadata server-side. OpenAI-generated output is validated with Pydantic; if the API is unavailable, the curated catalog-backed question set allows the flow to continue.
 
 ## Local setup
 
