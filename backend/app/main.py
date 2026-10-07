@@ -4,12 +4,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import models
-from .database import Base, engine
+from .database import Base, SessionLocal, engine
+from .seed_topics import seed_topics
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    database = SessionLocal()
+    try:
+        seed_topics(database)
+    finally:
+        database.close()
     yield
 
 
