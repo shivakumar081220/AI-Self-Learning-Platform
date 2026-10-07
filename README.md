@@ -2,7 +2,7 @@
 
 AI-powered adaptive learning platform for the Generative AI track.
 
-## Phase 1 through Phase 4 status
+## Phase 1 through Phase 5 status
 
 This repository currently contains the project foundation and database catalog:
 
@@ -21,6 +21,8 @@ This repository currently contains the project foundation and database catalog:
 - Deterministic prerequisite-aware personalized learning-path engine
 - Learning-path persistence, regeneration, current-topic tracking, and rationale
 - Responsive Learning Path screen with progress and prerequisite visibility
+- OpenRouter AI provider integration through the OpenAI-compatible SDK
+- Provider-error and invalid-output fallback to curated diagnostic questions
 
 The catalog currently contains nine Generative AI topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems.
 
@@ -41,6 +43,18 @@ Diagnostic questions keep answer keys and concept metadata server-side. OpenAI-g
 - `POST /api/learners/{learner_id}/learning-path/regenerate` recalculates the path while preserving the current topic when possible.
 
 The path engine uses learner goal, experience level, concept scores, weak concepts, completed topics, prerequisite relationships, and recent topic assessment scores. It ranks only valid catalog topics, enforces prerequisite order, skips mastered topics from new recommendations, and stores a reason for every selected topic. No LLM is responsible for topic selection.
+
+## Phase 5 OpenRouter AI provider
+
+The existing diagnostic AI service uses OpenRouter through the OpenAI-compatible SDK. Configure these variables in a local, ignored `.env` file:
+
+```text
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openrouter/free
+```
+
+The provider is optional for local startup. Missing keys, provider errors, rate limits, network failures, empty responses, and invalid Pydantic output all fall back to the curated diagnostic question set. The application never returns or logs the provider key.
 
 ## Local setup
 

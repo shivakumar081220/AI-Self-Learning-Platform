@@ -153,9 +153,12 @@ def _openai_questions(learner: Any, database: Session) -> DiagnosticQuestionSet:
             "internal_metadata": ["concept", "correct_option", "explanation"],
         },
     }
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = OpenAI(
+        api_key=settings.openrouter_api_key,
+        base_url=settings.openrouter_base_url,
+    )
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=settings.openrouter_model,
         temperature=0.2,
         response_format={"type": "json_object"},
         messages=[
@@ -177,7 +180,7 @@ def _openai_questions(learner: Any, database: Session) -> DiagnosticQuestionSet:
 
 
 def generate_diagnostic(learner: Any, database: Session) -> tuple[DiagnosticQuestionSet, str]:
-    if settings.openai_api_key:
+    if settings.openrouter_api_key:
         try:
             return _openai_questions(learner, database), "openai"
         except (Exception, ValidationError):
