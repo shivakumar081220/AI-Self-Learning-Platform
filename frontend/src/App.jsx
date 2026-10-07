@@ -362,7 +362,7 @@ function LearningPathPage() {
                 <p className="path-reason">{topic.reason}</p>
                 {topic.prerequisites.length > 0 && <p className="prerequisite-line"><strong>Prerequisites:</strong> {topic.prerequisites.join(", ")}</p>}
               </div>
-              {topic.topic_id === path.current_topic_id && <span className="current-marker">Next</span>}
+              {topic.topic_id === path.current_topic_id && <Link className="current-marker" to={`/learn/${learnerId}`} aria-label={`Open ${topic.title} learning experience`}>Next</Link>}
             </article>
           ))}
         </section>
