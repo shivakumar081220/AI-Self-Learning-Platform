@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.models import Assessment, LearningPath, Recommendation, SkillScore, TopicProgress, Weakness
+from app.models import Assessment, LearningPath, Recommendation, SkillScore, Topic, TopicProgress, Weakness
 from app.seed_topics import seed_topics
-from app.services import assessment_service
+from app.services import ai_provider, assessment_service
 from app.services.assessment_service import QUESTION_BANK
 
 
@@ -98,6 +98,71 @@ def test_assessment_requires_learned_topic_and_hides_answer_keys(client: TestCli
     assert all("explanation" not in question for question in generated["questions"])
 
 
+def test_generated_topic_with_one_concept_gets_three_fallback_questions():
+    topic = Topic(
+        id="generated-one-concept",
+        title="Agent Planning",
+        description="Plan a bounded sequence of tool calls for an AI agent.",
+        difficulty="intermediate",
+        concept_tags=["agent_planning"],
+    )
+
+    question_set = assessment_service._fallback_questions(topic)
+
+    assert len(question_set.questions) == 3
+    assert len({question.question_id for question in question_set.questions}) == 3
+    assert {question.concept for question in question_set.questions} == {"agent_planning"}
+
+
+def test_assessment_endpoint_falls_back_for_generated_one_concept_topic(
+    client: TestClient, monkeypatch
+):
+    learner = client.post(
+        "/api/learners",
+        json={"name": "Generated Topic", "experience_level": "beginner", "goal_key": "ai_agents"},
+    ).json()
+    topic_id = "generated-one-concept"
+    with Session(app.state.phase7_test_engine) as database:
+        topic = Topic(
+            id=topic_id,
+            title="Agent Planning",
+            description="Plan a bounded sequence of tool calls for an AI agent.",
+            difficulty="beginner",
+            concept_tags=["agent_planning"],
+            content_source="AI-generated learner curriculum",
+        )
+        database.add(topic)
+        database.add(
+            LearningPath(
+                learner_id=learner["id"],
+                goal=learner["goal_text"],
+                path_json=[{"topic_id": topic_id, "title": topic.title}],
+                overall_rationale="Generated one-concept topic test",
+                current_index=0,
+            )
+        )
+        database.add(TopicProgress(learner_id=learner["id"], topic_id=topic_id, status="completed"))
+        database.commit()
+
+    def reject_request(**kwargs):
+        raise RuntimeError("AuthenticationError")
+
+    class RejectedProvider:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=reject_request))
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "invalid-test-key")
+    monkeypatch.setattr(ai_provider, "OpenAI", RejectedProvider)
+
+    generated = client.post(
+        f"/api/learners/{learner['id']}/topics/{topic_id}/assessment/generate"
+    )
+
+    assert generated.status_code == 200, generated.text
+    assert generated.json()["source"] == "curated_fallback"
+    assert len(generated.json()["questions"]) == 3
+
+
 def test_missing_key_and_invalid_ai_output_use_curated_questions(client: TestClient, monkeypatch):
     learner, _, topic_id = prepare_learned_topic(client)
     monkeypatch.setattr(settings, "openrouter_api_key", "")
@@ -106,7 +171,7 @@ def test_missing_key_and_invalid_ai_output_use_curated_questions(client: TestCli
 
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
     FakeAssessmentProvider.response_content = json.dumps({"questions": []})
-    monkeypatch.setattr(assessment_service, "OpenAI", FakeAssessmentProvider)
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeAssessmentProvider)
     invalid = generate_assessment(client, learner["id"], topic_id)
     assert invalid["source"] == "curated_fallback"
 
@@ -115,7 +180,7 @@ def test_mocked_openrouter_assessment_is_validated(client: TestClient, monkeypat
     learner, _, topic_id = prepare_learned_topic(client)
     FakeAssessmentProvider.response_content = json.dumps({"questions": QUESTION_BANK[topic_id]})
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
-    monkeypatch.setattr(assessment_service, "OpenAI", FakeAssessmentProvider)
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeAssessmentProvider)
 
     generated = generate_assessment(client, learner["id"], topic_id)
 
@@ -151,6 +216,73 @@ def test_weak_result_persists_skills_weakness_recommendation_and_remediation(cli
         assert weakness.status == "open"
         assert progress.status == "remediation"
         assert recommendation.action_type == "remediate"
+
+
+def test_summary_and_persisted_result_ignore_recommendations_outside_active_course(client: TestClient):
+    learner, _, topic_id = prepare_learned_topic(client)
+    generated = generate_assessment(client, learner["id"], topic_id)
+    submitted = client.post(
+        f"/api/learners/{learner['id']}/assessments/{generated['assessment_id']}/submit",
+        json={"answers": answers_for(generated, 1)},
+    )
+    assert submitted.status_code == 200
+    current_recommendation = submitted.json()["recommendation"]
+
+    with Session(app.state.phase7_test_engine) as database:
+        unrelated_topic = Topic(
+            id="another-course-topic",
+            title="Topic from another course",
+            description="An unrelated course topic.",
+            difficulty="beginner",
+            concept_tags=[],
+            goal_relevance={},
+            content_source="test",
+        )
+        database.add(unrelated_topic)
+        database.flush()
+        database.add(
+            Recommendation(
+                learner_id=learner["id"],
+                action_type="continue",
+                topic_id=unrelated_topic.id,
+                reason="This recommendation belongs to another course.",
+            )
+        )
+        database.commit()
+
+    summary = client.get(f"/api/learners/{learner['id']}/summary").json()
+    persisted = client.get(
+        f"/api/learners/{learner['id']}/assessments/{generated['assessment_id']}"
+    ).json()
+
+    assert summary["recommendation"]["target_topic_id"] == current_recommendation["target_topic_id"]
+    assert persisted["recommendation"]["target_topic_id"] == current_recommendation["target_topic_id"]
+
+
+def test_retry_after_weak_result_creates_different_questions_for_same_topic(
+    client: TestClient, monkeypatch
+):
+    learner, _, topic_id = prepare_learned_topic(client)
+    learner_id = learner["id"]
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    first = generate_assessment(client, learner_id, topic_id)
+    submitted = client.post(
+        f"/api/learners/{learner_id}/assessments/{first['assessment_id']}/submit",
+        json={"answers": answers_for(first, 1)},
+    )
+    assert submitted.status_code == 200
+    assert submitted.json()["recommendation"]["action_type"] == "remediate"
+
+    retry = client.post(
+        f"/api/learners/{learner_id}/topics/{topic_id}/assessment/generate"
+    )
+
+    assert retry.status_code == 200, retry.text
+    second = retry.json()
+    assert second["topic_id"] == topic_id
+    assert {item["question"] for item in second["questions"]}.isdisjoint(
+        {item["question"] for item in first["questions"]}
+    )
 
 
 def test_strong_result_advances_and_updates_path(client: TestClient):
@@ -204,7 +336,8 @@ def test_invalid_answers_duplicate_submission_and_persisted_result(client: TestC
     )
     assert reloaded.status_code == 200
     assert reloaded.json()["percentage"] == result.json()["percentage"]
-    assert "correct_option" not in reloaded.text
+    assert reloaded.json()["question_review"] == result.json()["question_review"]
+    assert all("correct_option" in question for question in reloaded.json()["question_review"])
 
 
 def test_skill_update_uses_historical_weighting(client: TestClient):

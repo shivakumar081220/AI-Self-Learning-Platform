@@ -1,8 +1,8 @@
 # AI Self-Learning Platform
 
-AI-powered adaptive learning platform for the Generative AI track.
+AI-powered adaptive learning across eight selectable tracks, from Python and machine learning to generative AI and agentic systems.
 
-## Phase 1 through Phase 9 status
+## Project status
 
 This repository currently contains the project foundation and database catalog:
 
@@ -13,8 +13,8 @@ This repository currently contains the project foundation and database catalog:
 - Curated Generative AI topic catalog with prerequisite relationships
 - Idempotent topic seeding during FastAPI startup
 - FastAPI health endpoint
-- Learner profile and Generative AI goal-selection API and UI
-- OpenAI-backed, Pydantic-validated diagnostic generation with curated fallback
+- Learner profile and AI track/goal-selection API and UI
+- OpenRouter-backed, Pydantic-validated diagnostic generation with curated fallback
 - Deterministic MCQ scoring and concept-level skill analysis
 - SQLite persistence for diagnostic attempts and skill scores
 - Responsive profile, diagnostic, and analysis screens
@@ -33,9 +33,21 @@ This repository currently contains the project foundation and database catalog:
 - Secure registration, bcrypt password hashing, JWT login, logout, and session restoration
 - Authenticated learner ownership and cross-user data isolation
 - AI-generated persisted per-learner curriculum with generated topics and prerequisites
+- Eight selectable AI learning tracks with track-specific personalized curricula
 - Resume dashboard for course, path, progress, skills, assessments, and recommendations
 
-The catalog currently contains nine Generative AI topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems.
+The legacy curated Generative AI topic catalog contains nine topics, from foundations and prompt engineering through RAG, evaluation, agents, and production systems. Authenticated learners can select from the eight tracks below and receive a personalized curriculum for their selection.
+
+## AI learning tracks
+
+1. Python for AI
+2. Machine Learning
+3. Deep Learning
+4. Natural Language Processing
+5. Generative AI
+6. Large Language Models
+7. Retrieval-Augmented Generation (RAG)
+8. AI Agents / Agentic Systems
 
 ## Phase 3 API
 
@@ -45,7 +57,7 @@ The catalog currently contains nine Generative AI topics, from foundations and p
 - `POST /api/learners/{learner_id}/diagnostic/{assessment_id}/submit` scores answers and stores concept skills.
 - `GET /api/learners/{learner_id}/skills` returns strong, developing, weak, and individual concept scores.
 
-Diagnostic questions keep answer keys and concept metadata server-side. OpenAI-generated output is validated with Pydantic; if the API is unavailable, the curated catalog-backed question set allows the flow to continue.
+Diagnostic questions keep answer keys and concept metadata server-side. OpenRouter-generated output is validated with Pydantic; if the provider is unavailable, the curated catalog-backed question set allows the flow to continue.
 
 ## Phase 4 adaptive path
 
@@ -129,27 +141,27 @@ Authentication also requires a strong local `JWT_SECRET_KEY`. The backend intent
 JWT_SECRET_KEY=replace_with_a_long_random_local_secret
 ```
 
-The existing workspace `.env.example` is intentionally not modified by Phase 9.
-
-## Authentication and generated curriculum
+## Security notes and generated curriculum
 
 Unauthenticated users see the landing, login, and registration pages. Authenticated routes require a bearer JWT. Passwords are bcrypt-hashed and never returned. Each account owns its learner profile, generated course, topics, path, progress, skills, assessments, weaknesses, and recommendations. Protected routes verify ownership before returning learner data.
+
+The OpenRouter key is backend-only, `.env` is ignored, and authenticated routes fail closed when the JWT secret is missing. Automated ownership tests verify that one account cannot access another account's learner data.
 
 After onboarding, OpenRouter generates a Pydantic-validated course structure. The backend assigns application-generated topic IDs, persists the course and prerequisite graph, and loads that same course after logout/login. When OpenRouter is unavailable, a deterministic goal-specific fallback is persisted per learner; the old global catalog is not the normal authenticated curriculum source.
 
 ## Planned MVP journey
 
-Learner Profile -> AI Goal Selection -> Diagnostic Assessment -> Skill Analysis -> Personalized Learning Path -> AI Learning Content -> Assessment -> Weakness Detection -> Adaptive Remediation or Recommendation.
+Learner Profile -> Track and Goal Selection -> Personalized Curriculum -> Diagnostic Assessment -> Skill Analysis -> Adaptive Learning Path -> AI Learning Content -> Assessment -> Weakness Detection -> Remediation or Targeted Practice -> AI Tutor -> Progress.
 
 ## Submission Overview
 
 ### Problem
 
-Most course sequences treat every learner identically. This project builds a Generative AI learning experience that measures a learner, teaches the next useful topic, evaluates understanding, and changes the next action based on evidence.
+Most course sequences treat every learner identically. This project builds an AI learning experience that measures a learner, teaches the next useful topic, evaluates understanding, and changes the next action based on evidence.
 
 ### Solution
 
-The platform combines a curated Generative AI topic graph, structured OpenRouter generation, SQLite learner state, and deterministic adaptation. A new learner can complete the full journey from the browser without editing code or database records.
+The platform combines eight selectable AI tracks, structured OpenRouter generation, SQLite learner state, and deterministic adaptation. A new learner can complete the full journey from the browser without editing code or database records.
 
 ### Mandatory MVP features
 
@@ -183,7 +195,7 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --app-dir backend --reload
+uvicorn app.main:app --reload
 ```
 
 ### Frontend
@@ -202,13 +214,16 @@ The frontend is normally available at `http://127.0.0.1:5173`; the API is at `ht
 - `POST /api/auth/register`: create an account and return a short-lived JWT
 - `POST /api/auth/login`: authenticate and return a JWT
 - `GET /api/auth/me`: restore the authenticated account
+- `GET /api/tracks`: list the eight supported AI learning tracks
 - `GET /api/learners/me`: load the authenticated learner profile
 - `PUT /api/learners/me`: safely update the authenticated learner profile
 - `POST /api/curriculum/generate`: generate and persist the authenticated learner's course once
 - `GET /api/curriculum/current`: load the persisted authenticated course
 - `POST /api/learners/{id}/diagnostic/generate`: generate diagnostic MCQs
 - `POST /api/learners/{id}/diagnostic/{assessment_id}/submit`: score diagnostic answers
+- `GET /api/learners/{id}/diagnostic/{assessment_id}`: reload submitted diagnostic feedback
 - `GET /api/learners/{id}/summary`: persisted dashboard state
+- `POST /api/learners/{id}/tutor`: ask a question using current topic and learner skill context
 - `GET|POST /api/learners/{id}/learning-path`: retrieve or generate a path
 - `GET /api/learners/{id}/learning-path/current`: retrieve the current topic
 - `GET /api/learners/{id}/topics/{topic_id}/content`: load learning content
@@ -216,6 +231,8 @@ The frontend is normally available at `http://127.0.0.1:5173`; the API is at `ht
 - `POST /api/learners/{id}/topics/{topic_id}/assessment/generate`: generate topic MCQs
 - `GET /api/learners/{id}/assessments/{assessment_id}`: retrieve questions or persisted results
 - `POST /api/learners/{id}/assessments/{assessment_id}/submit`: score and adapt
+
+Submitted diagnostic and topic assessment results include per-question correctness, the correct option, and an explanation. Answer keys are not included in generated or pending assessments. The tutor uses OpenRouter when configured and returns a topic-aware deterministic fallback when the provider is unavailable. Assessment remediation and targeted-practice guidance use AI when available while progression and scoring remain deterministic.
 
 ## Adaptive logic
 
@@ -229,7 +246,9 @@ AI handles generated questions, explanations, learning content, examples, and al
 
 ## Reliability and fallback
 
-The application works without OpenRouter. Missing keys, provider failures, rate limits, network errors, empty responses, or invalid structured output use curated diagnostic questions, topic assessment questions, or curated learning content. Frontend failures use human-readable messages and do not expose stack traces or provider details.
+The application works without OpenRouter. AI-generated curricula, questions, learning content, tutor replies, and remediation are validated where applicable. Missing keys, provider failures, rate limits, network errors, empty responses, or invalid structured output use deterministic curriculum generation, curated questions/content, or deterministic tutor/remediation guidance as appropriate. Scoring, skill updates, authorization, and path decisions are deterministic regardless of provider availability. Frontend failures use human-readable messages and do not expose stack traces or provider details.
+
+For a credit-consuming provider smoke test, set `RUN_OPENROUTER_LIVE_TEST=1` and run `pytest backend/tests/test_openrouter_live.py -q` with `OPENROUTER_API_KEY` configured. The regular test suite never sends live OpenRouter requests.
 
 ## Demo steps
 
@@ -256,4 +275,4 @@ All automated AI tests mock OpenRouter. No test makes a real provider request.
 
 ## Known limitations and future improvements
 
-The MVP supports one Generative AI track and MCQ assessments. Authentication, conversational tutoring, retrieval over external sources, additional question types, and deployment are future improvements. SQLite startup creation is intentionally lightweight for this challenge; a migration tool would be appropriate for a larger production deployment.
+The MVP supports eight AI learning tracks and MCQ assessments. Tutor responses are scoped to supplied learner and topic context; retrieval over external sources, additional question types, refresh-token rotation, and deployment remain future improvements. SQLite startup creation is intentionally lightweight for this challenge; a migration tool would be appropriate for a larger production deployment.

@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import Assessment, Learner, LearningPath, Recommendation, Topic, TopicProgress
+from ..models import Assessment, Learner, LearningPath, Recommendation, SkillScore, Topic, TopicProgress
 from ..schemas import (
     AssessmentGenerateResponse,
     AssessmentQuestionPublic,
@@ -11,6 +11,7 @@ from ..schemas import (
     AssessmentResultResponse,
     AssessmentSubmitRequest,
     ConceptResult,
+    QuestionReviewItem,
     RecommendationResponse,
 )
 from ..services.assessment_result_service import apply_assessment_result, classify_score
@@ -77,6 +78,27 @@ def _public_response(
     )
 
 
+def _build_question_review(assessment: Assessment) -> list[QuestionReviewItem]:
+    answer_by_id = {answer["question_id"]: answer for answer in assessment.answers_json}
+    review_items: list[QuestionReviewItem] = []
+    for question in assessment.questions_json:
+        answer = answer_by_id.get(question["question_id"])
+        selected_option = answer.get("selected_option") if answer else None
+        review_items.append(
+            QuestionReviewItem(
+                question_id=question["question_id"],
+                question=question["question"],
+                options=question["options"],
+                selected_option=selected_option,
+                correct_option=question["correct_option"],
+                is_correct=bool(answer and answer.get("is_correct")),
+                concept=question["concept"],
+                explanation=question.get("explanation", ""),
+            )
+        )
+    return review_items
+
+
 def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -> AssessmentResultResponse:
     question_by_id = {question["question_id"]: question for question in assessment.questions_json}
     concept_state: dict[str, dict[str, int]] = {}
@@ -105,12 +127,26 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
             weak.append(concept)
         elif level == "strong":
             strong.append(concept)
-    recommendation = database.scalar(
-        select(Recommendation)
-        .where(Recommendation.learner_id == assessment.learner_id)
-        .order_by(Recommendation.created_at.desc())
+    path = database.scalar(
+        select(LearningPath)
+        .where(LearningPath.learner_id == assessment.learner_id)
+        .order_by(LearningPath.created_at.desc())
+    )
+    path_topic_ids = [item.get("topic_id") for item in path.path_json if item.get("topic_id")] if path else []
+    recommendation = (
+        database.scalar(
+            select(Recommendation)
+            .where(
+                Recommendation.learner_id == assessment.learner_id,
+                Recommendation.topic_id.in_(path_topic_ids),
+            )
+            .order_by(Recommendation.created_at.desc())
+        )
+        if path_topic_ids
+        else None
     )
     target_topic = database.get(Topic, recommendation.topic_id) if recommendation and recommendation.topic_id else None
+    stored_remediation = (assessment.feedback_json or {}).get("remediation")
     action_type = recommendation.action_type if recommendation else "continue"
     summary = recommendation.reason if recommendation else "Assessment result saved."
     next_action = (
@@ -139,11 +175,16 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
             summary=summary,
             next_action=next_action,
             remediation=(
-                "Review the weak concept using a simpler analogy and targeted practice."
+                stored_remediation["explanation"]
+                if stored_remediation
+                else "Review the weak concept using a simpler analogy and targeted practice."
                 if action_type in {"remediate", "practice"}
                 else None
             ),
+            practice_suggestion=stored_remediation.get("practice_suggestion") if stored_remediation else None,
+            remediation_source=stored_remediation.get("source") if stored_remediation else None,
         ),
+        question_review=_build_question_review(assessment),
     )
 
 
@@ -151,8 +192,41 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
 def generate_topic_assessment(
     learner_id: int, topic_id: str, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> AssessmentGenerateResponse:
-    learner, topic, _, _ = _get_assessment_context(learner_id, topic_id, database, user=user)
-    question_set, source = generate_assessment_questions(topic, learner)
+    learner, topic, _, progress = _get_assessment_context(
+        learner_id, topic_id, database, require_completed=False, user=user
+    )
+    previous_assessments = database.scalars(
+        select(Assessment)
+        .where(
+            Assessment.learner_id == learner_id,
+            Assessment.topic_id == topic_id,
+            Assessment.assessment_type == "topic",
+            Assessment.completed_at.is_not(None),
+        )
+        .order_by(Assessment.created_at.asc())
+    ).all()
+    if (not progress or progress.status != "completed") and not previous_assessments:
+        raise HTTPException(
+            status_code=400,
+            detail="Complete the learning activity before starting its assessment",
+        )
+    weak_concepts = [
+        skill.concept
+        for skill in database.scalars(
+            select(SkillScore).where(
+                SkillScore.learner_id == learner.id,
+                SkillScore.score < 0.75,
+            )
+        ).all()
+    ]
+    previous_questions = [
+        question
+        for previous in previous_assessments
+        for question in previous.questions_json
+    ]
+    question_set, source = generate_assessment_questions(
+        topic, learner, weak_concepts, previous_questions
+    )
     assessment = Assessment(
         learner_id=learner_id,
         topic_id=topic_id,

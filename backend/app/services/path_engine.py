@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..goal_catalog import GOAL_BY_KEY
 from ..models import Assessment, Learner, LearningPath, SkillScore, Topic, TopicPrerequisite, TopicProgress
+from ..track_catalog import TRACK_BY_ID
 
 
 MASTERY_THRESHOLD = 0.80
@@ -24,6 +25,16 @@ def infer_goal_key(goal_text: str) -> str:
     if goal_text in {goal.label for goal in GOAL_BY_KEY.values()}:
         return next(key for key, goal in GOAL_BY_KEY.items() if goal.label == goal_text)
     return "llm_apps"
+
+
+def _learner_track_key(learner: Learner) -> str:
+    if learner.track in TRACK_BY_ID and learner.track != "generative_ai":
+        return learner.track
+    return infer_goal_key(learner.goal_text)
+
+
+def _topic_relevance(topic: Topic, goal_key: str) -> float:
+    return float(topic.goal_relevance.get(goal_key, topic.goal_relevance.get("generated", 0.0)))
 
 
 def validate_topic_graph(
@@ -105,7 +116,7 @@ def _topic_priority(
     downstream_pressure: dict[str, int],
 ) -> tuple[float, ...]:
     metrics = _topic_scores(skills, topic)
-    goal_relevance = float(topic.goal_relevance.get(goal_key, 0.0))
+    goal_relevance = _topic_relevance(topic, goal_key)
     recent_score = recent_scores.get(topic.id)
     recent_pressure = (
         3.0 if recent_score < FOCUSED_PRACTICE_THRESHOLD else 1.0 if recent_score < MASTERY_THRESHOLD else 0.0
@@ -135,7 +146,8 @@ def _topic_reason(
     mastered: set[str],
 ) -> str:
     metrics = _topic_scores(skills, topic)
-    reasons = [f"It supports your {GOAL_BY_KEY.get(goal_key).label.lower() if goal_key in GOAL_BY_KEY else 'Generative AI'} goal."]
+    track_name = TRACK_BY_ID.get(goal_key).name if goal_key in TRACK_BY_ID else "Generative AI"
+    reasons = [f"It supports your {track_name} track and goal."]
     if metrics["weak_concepts"]:
         reasons.append(
             "It targets weak concepts: "
@@ -158,7 +170,12 @@ def _topic_reason(
 
 def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
     if learner.user_id is not None:
-        topics = database.scalars(select(Topic).where(Topic.owner_user_id == learner.user_id)).all()
+        topics = database.scalars(
+            select(Topic).where(
+                Topic.owner_user_id == learner.user_id,
+                Topic.is_active.is_(True),
+            )
+        ).all()
         topic_ids = {topic.id for topic in topics}
         relationships = database.scalars(
             select(TopicPrerequisite).where(
@@ -167,7 +184,9 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
             )
         ).all()
     else:
-        topics = database.scalars(select(Topic).where(Topic.owner_user_id.is_(None))).all()
+        topics = database.scalars(
+            select(Topic).where(Topic.owner_user_id.is_(None), Topic.is_active.is_(True))
+        ).all()
         relationships = database.scalars(select(TopicPrerequisite)).all()
     topic_by_id = validate_topic_graph(topics, relationships)
     prerequisites: dict[str, list[str]] = defaultdict(list)
@@ -189,7 +208,7 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
     ).all()
     recent_scores = _assessment_scores(assessments)
     mastered = _mastered_topic_ids(topics, progress, skills)
-    goal_key = infer_goal_key(learner.goal_text)
+    goal_key = _learner_track_key(learner)
 
     completed_progress_ids = {
         topic_id for topic_id, record in progress.items() if record.status == "completed"
@@ -243,12 +262,12 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
                     "status": "completed",
                     "prerequisites": prerequisites.get(topic.id, []),
                     "reason": "Already completed in your learning history, so it will not be recommended again.",
-                    "relevance_score": float(topic.goal_relevance.get(goal_key, 0.0)),
+                    "relevance_score": _topic_relevance(topic, goal_key),
                 }
             )
     for topic_id in ordered_ids:
         topic = topic_by_id[topic_id]
-        relevance = float(topic.goal_relevance.get(goal_key, 0.0))
+        relevance = _topic_relevance(topic, goal_key)
         progress_record = progress.get(topic.id)
         topics_json.append(
             {
@@ -266,8 +285,8 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
         "goal": learner.goal_text,
         "topics": topics_json,
         "overall_rationale": (
-            f"This path is ordered for your {learner.experience_level} experience level and "
-            "selected goal. It places unmet prerequisites before dependent topics, prioritizes "
+            f"This {TRACK_BY_ID.get(goal_key).name if goal_key in TRACK_BY_ID else 'Generative AI'} path is ordered for your "
+            f"{learner.experience_level} experience level and selected goal. It places unmet prerequisites before dependent topics, prioritizes "
             "weak concepts and recent assessment gaps, and skips mastered topics."
         ),
     }

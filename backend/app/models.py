@@ -31,8 +31,12 @@ class GeneratedCourse(Base):
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text)
     goal: Mapped[str] = mapped_column(Text)
+    target_outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     level: Mapped[str] = mapped_column(String(30))
     estimated_duration: Mapped[str] = mapped_column(String(80))
+    track_id: Mapped[str] = mapped_column(String(50), default="generative_ai")
+    track_history_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    generation_source: Mapped[str] = mapped_column(String(30), default="unknown")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
@@ -105,6 +109,8 @@ class Topic(Base):
     concept_tags: Mapped[list[Any]] = mapped_column(JSON, default=list)
     goal_relevance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     content_source: Mapped[str] = mapped_column(String(240))
+    track_id: Mapped[str] = mapped_column(String(50), default="generative_ai")
+    is_active: Mapped[bool] = mapped_column(default=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     course_id: Mapped[int | None] = mapped_column(ForeignKey("generated_courses.id"), nullable=True, index=True)
 
@@ -200,6 +206,7 @@ class Assessment(Base):
     assessment_type: Mapped[str] = mapped_column(String(30), default="diagnostic")
     questions_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     answers_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    feedback_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

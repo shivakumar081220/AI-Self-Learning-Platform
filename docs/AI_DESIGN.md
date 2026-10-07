@@ -2,15 +2,17 @@
 
 ## Why AI is used
 
-OpenRouter is used for meaningful generative work in the Generative AI learning track:
+OpenRouter supports generated and personalized learning material across the selected AI learning track:
 
+- Personalized curriculum title, topic structure, objectives, and prerequisites
 - Diagnostic question generation
 - Topic assessment question generation
 - Learning explanations, examples, and analogies
 - Personalized learning content
-- Curriculum title, topic structure, objectives, and prerequisites for authenticated learners
+- Assessment-result interpretation and remediation guidance
+- Context-aware AI Tutor responses and coding examples
 
-The product remains useful without an AI provider because every AI feature has a curated or deterministic fallback.
+The product remains useful without an AI provider: curriculum generation and tutor/remediation guidance have deterministic fallbacks, while diagnostic questions, assessment questions, and learning content have curated fallbacks.
 
 ## Provider configuration
 
@@ -38,7 +40,7 @@ The prompt tells the model to stay within the supplied topic and curriculum. It 
 
 ## Structured output and validation
 
-Diagnostic questions, assessment questions, and learning content are represented by Pydantic schemas. The backend validates:
+Generated curricula, diagnostic and assessment questions, learning content, tutor responses, and remediation guidance are represented by Pydantic schemas. The backend validates:
 
 - Required fields and lengths
 - Question option indexes
@@ -47,7 +49,7 @@ Diagnostic questions, assessment questions, and learning content are represented
 - Topic and concept membership
 - Exact requested topic ID and title for learning content
 
-Invalid output is rejected and replaced with curated content.
+Invalid output is rejected and replaced with curated content or deterministic guidance, according to the feature.
 
 ## Deterministic responsibilities
 
@@ -71,8 +73,8 @@ Topic assessment skill updates use `0.6 * previous_score + 0.4 * latest_score` a
 
 ## Failure behavior
 
-Missing API keys, provider errors, rate limits, network failures, empty responses, and malformed structured output all route to curated fallback questions or content. Automated tests mock the provider and never make real OpenRouter requests.
+Missing API keys, provider errors, rate limits, network failures, empty responses, and malformed structured output use the appropriate curated or deterministic fallback. Automated tests mock the provider and never make real OpenRouter requests.
 
 ## Limitations
 
-The MVP uses AI-domain onboarding and MCQs only. Tutor conversations, retrieval over external documents, refresh-token rotation, httpOnly cookie sessions, and multiple question formats are future work. Free-model output quality can vary, which is why the application validates output and maintains deterministic per-learner fallback material.
+The MVP supports eight AI learning tracks and MCQ assessments. Tutor responses are limited to supplied learner and topic context; retrieval over external documents, refresh-token rotation, httpOnly cookie sessions, and additional question formats are future work. Free-model output quality can vary, which is why the application validates output and maintains deterministic or curated fallback material.

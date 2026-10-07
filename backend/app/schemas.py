@@ -46,9 +46,20 @@ class GoalOption(BaseModel):
     description: str
 
 
+class AITrackOption(BaseModel):
+    id: str
+    name: str
+    description: str
+    learning_objective: str
+    difficulty: ExperienceLevel
+    example_goals: list[str]
+    prerequisite_tracks: list[str]
+
+
 class LearnerCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     experience_level: ExperienceLevel
+    track_id: str | None = None
     goal_key: str | None = None
     custom_goal: str | None = Field(default=None, max_length=240)
     preferred_learning_style: str | None = Field(default=None, max_length=80)
@@ -73,6 +84,7 @@ class LearnerResponse(BaseModel):
     name: str
     experience_level: ExperienceLevel
     goal_text: str
+    target_outcome: str | None = None
     track: str
     created_at: datetime
 
@@ -90,6 +102,7 @@ class CurriculumTopic(BaseModel):
 class GeneratedCurriculum(BaseModel):
     course_title: str = Field(min_length=5, max_length=200)
     description: str = Field(min_length=20, max_length=800)
+    track_id: str = Field(min_length=2, max_length=50)
     goal: str = Field(min_length=3, max_length=240)
     level: ExperienceLevel
     estimated_duration: str = Field(min_length=3, max_length=80)
@@ -107,13 +120,18 @@ class GeneratedCurriculum(BaseModel):
 
 class CurriculumResponse(BaseModel):
     course_id: int
+    track_id: str
+    track_name: str
     course_title: str
     description: str
     goal: str
     level: ExperienceLevel
     estimated_duration: str
     topics: list[dict]
+    track_history: list[dict] = Field(default_factory=list)
+    courses: list[dict] = Field(default_factory=list)
     source: Literal["openrouter", "deterministic_fallback", "persisted"]
+    generation_source: Literal["openrouter", "deterministic_fallback", "unknown"]
 
 
 class DiagnosticQuestion(BaseModel):
@@ -154,7 +172,7 @@ class DiagnosticQuestionPublic(BaseModel):
 class DiagnosticGenerateResponse(BaseModel):
     assessment_id: int
     questions: list[DiagnosticQuestionPublic]
-    generated_by: Literal["openai", "curated_fallback"]
+    generated_by: Literal["openrouter", "curated_fallback"]
 
 
 class AnswerSubmission(BaseModel):
@@ -184,9 +202,63 @@ class SkillAnalysisResponse(BaseModel):
     skills: list[SkillScoreResponse]
 
 
+class SkillInterpretationResponse(BaseModel):
+    summary: str
+    focus_concepts: list[str]
+    knowledge_level: str = "developing"
+    knowledge_assessment: str = ""
+    source: Literal["openrouter", "deterministic_fallback"]
+
+
+class CodingExample(BaseModel):
+    title: str = Field(min_length=3, max_length=140)
+    code: str = Field(min_length=8, max_length=5000)
+    explanation: str = Field(min_length=10, max_length=1200)
+    expected_output: str | None = Field(default=None, max_length=1200)
+    why_it_matters: str = Field(min_length=10, max_length=700)
+    common_mistake: str = Field(min_length=10, max_length=500)
+
+
+class QuestionReviewItem(BaseModel):
+    question_id: str
+    question: str
+    options: list[str]
+    selected_option: int | None
+    correct_option: int
+    is_correct: bool
+    concept: str
+    explanation: str
+
+
 class DiagnosticSubmitResponse(SkillAnalysisResponse):
     assessment_id: int
     answered_questions: int
+    question_review: list[QuestionReviewItem] = Field(default_factory=list)
+    ai_interpretation: SkillInterpretationResponse | None = None
+
+
+class TutorRequest(BaseModel):
+    question: str = Field(min_length=4, max_length=500)
+    topic_id: str | None = Field(default=None, max_length=80)
+
+
+class TutorResponse(BaseModel):
+    learner_id: int
+    topic_id: str | None
+    topic_title: str
+    answer: str
+    simple_explanation: str
+    example: str
+    coding_example: CodingExample | None = None
+    key_points: list[str]
+    weak_concepts: list[str]
+    related_topic: str | None
+    suggested_next_action: str
+    follow_up: str
+    course_title: str | None
+    course_connection: str
+    module_title: str | None
+    source: Literal["openrouter", "deterministic_fallback"]
 
 
 class LearningPathTopic(BaseModel):
@@ -229,11 +301,15 @@ class LearningContent(BaseModel):
     explanation: str = Field(min_length=40, max_length=3000)
     key_concepts: list[str] = Field(min_length=2, max_length=8)
     examples: list[str] = Field(min_length=1, max_length=5)
+    real_world_example: str | None = Field(default=None, max_length=1600)
     practical_example: str = Field(min_length=20, max_length=1600)
     common_mistakes: list[str] = Field(min_length=1, max_length=5)
     quick_recap: list[str] = Field(min_length=2, max_length=6)
     analogy: str | None = Field(default=None, max_length=900)
     code_example: str | None = Field(default=None, max_length=1800)
+    coding_example: CodingExample | None = None
+    prerequisites: list[str] = Field(default_factory=list, max_length=8)
+    practice_suggestion: str | None = Field(default=None, max_length=1000)
     important_notes: list[str] = Field(default_factory=list, max_length=6)
 
 
@@ -314,6 +390,8 @@ class RecommendationResponse(BaseModel):
     summary: str
     next_action: str
     remediation: str | None
+    practice_suggestion: str | None = None
+    remediation_source: Literal["openrouter", "deterministic_fallback", "persisted"] | None = None
 
 
 class AssessmentResultResponse(BaseModel):
@@ -329,10 +407,11 @@ class AssessmentResultResponse(BaseModel):
     weak_concepts: list[str]
     strong_concepts: list[str]
     recommendation: RecommendationResponse
+    question_review: list[QuestionReviewItem] = Field(default_factory=list)
 
 
 class LatestAssessmentSummary(BaseModel):
-    topic_id: str
+    topic_id: str | None
     topic_title: str
     percentage: float
 

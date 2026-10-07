@@ -14,7 +14,10 @@ router = APIRouter(prefix="/api/learners/{learner_id}/learning-path", tags=["lea
 
 
 def _topic_catalog(database: Session) -> dict[str, Topic]:
-    return {topic.id: topic for topic in database.scalars(select(Topic)).all()}
+    return {
+        topic.id: topic
+        for topic in database.scalars(select(Topic).where(Topic.is_active.is_(True))).all()
+    }
 
 
 def _serialize_path(path: LearningPath, database: Session) -> LearningPathResponse:
@@ -104,7 +107,11 @@ def get_learning_path(
         .where(LearningPath.learner_id == learner_id)
         .order_by(LearningPath.created_at.desc())
     )
-    return _serialize_path(path, database) if path else _persist_path(learner_id, database, False)
+    if path:
+        active_topic_ids = set(_topic_catalog(database))
+        if all(item.get("topic_id") in active_topic_ids for item in path.path_json):
+            return _serialize_path(path, database)
+    return _persist_path(learner_id, database, False)
 
 
 @router.post("/generate", response_model=LearningPathResponse)

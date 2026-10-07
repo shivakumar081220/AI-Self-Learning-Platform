@@ -4,8 +4,9 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..goal_catalog import GOAL_BY_KEY, GOAL_OPTIONS
-from ..models import Assessment, Learner, LearningGoal, LearningPath, Recommendation, SkillScore, Topic, TopicProgress
+from ..models import Assessment, GeneratedCourse, Learner, LearningGoal, LearningPath, Recommendation, SkillScore, Topic, TopicProgress
 from ..schemas import (
+    AITrackOption,
     GoalOption,
     LearnerCreate,
     LearnerResponse,
@@ -14,9 +15,13 @@ from ..schemas import (
     LatestAssessmentSummary,
     LearnerSummaryResponse,
     RecommendationResponse,
+    TutorRequest,
+    TutorResponse,
 )
 from ..models import User
 from ..security import ensure_learner_access, get_optional_user, require_user
+from ..services.tutor_service import answer_tutor_question, module_matches_question
+from ..track_catalog import AI_TRACKS, LEGACY_GOAL_TRACK, TRACK_BY_ID, infer_track_id
 
 
 router = APIRouter(prefix="/api", tags=["learners"])
@@ -48,6 +53,7 @@ def build_skill_analysis(learner_id: int, skills: list[SkillScore]) -> SkillAnal
         if total_evidence
         else 0.0
     )
+
     return SkillAnalysisResponse(
         learner_id=learner_id,
         overall_score=round(overall_score, 3),
@@ -59,9 +65,40 @@ def build_skill_analysis(learner_id: int, skills: list[SkillScore]) -> SkillAnal
     )
 
 
+def _selected_goal(payload: LearnerCreate) -> str:
+    if payload.custom_goal:
+        return payload.custom_goal
+    if payload.goal_key in GOAL_BY_KEY:
+        return GOAL_BY_KEY[payload.goal_key].label
+    raise HTTPException(status_code=422, detail="Select a learning goal or provide a custom goal")
+
+
+def _selected_track(payload: LearnerCreate, learner: Learner | None = None) -> str:
+    if payload.track_id:
+        if payload.track_id not in TRACK_BY_ID:
+            raise HTTPException(status_code=422, detail="Unknown AI learning track")
+        return payload.track_id
+    if payload.goal_key in LEGACY_GOAL_TRACK:
+        return LEGACY_GOAL_TRACK[payload.goal_key]
+    if learner and learner.track in TRACK_BY_ID:
+        return learner.track
+    return infer_track_id(payload.custom_goal or "", payload.goal_key)
+
+
+def _replace_active_goal(learner: Learner, goal_text: str, track_id: str) -> None:
+    for goal in learner.goals:
+        goal.is_active = False
+    learner.goals.append(LearningGoal(title=goal_text, track=track_id, is_active=True))
+
+
 @router.get("/goals", response_model=list[GoalOption])
 def list_goals() -> list[GoalOption]:
     return GOAL_OPTIONS
+
+
+@router.get("/tracks", response_model=list[AITrackOption])
+def list_ai_tracks() -> list[AITrackOption]:
+    return AI_TRACKS
 
 
 @router.get("/learners/me", response_model=LearnerResponse)
@@ -81,13 +118,14 @@ def update_my_learner(
     learner = database.scalar(select(Learner).where(Learner.user_id == user.id))
     if not learner:
         raise HTTPException(status_code=404, detail="Learner profile not found")
-    if payload.goal_key and payload.goal_key not in GOAL_BY_KEY:
-        raise HTTPException(status_code=422, detail="Unknown Generative AI learning goal")
+    goal_text = _selected_goal(payload)
+    learner.track = _selected_track(payload, learner)
     learner.name = payload.name
     learner.experience_level = payload.experience_level
-    learner.goal_text = payload.custom_goal or GOAL_BY_KEY[payload.goal_key].label
+    learner.goal_text = goal_text
     learner.preferred_learning_style = payload.preferred_learning_style
     learner.target_outcome = payload.target_outcome
+    _replace_active_goal(learner, goal_text, learner.track)
     database.commit()
     database.refresh(learner)
     return learner
@@ -99,19 +137,19 @@ def create_learner(
     database: Session = Depends(get_db),
     user: User | None = Depends(get_optional_user),
 ) -> Learner:
-    if payload.goal_key and payload.goal_key not in GOAL_BY_KEY:
-        raise HTTPException(status_code=422, detail="Unknown Generative AI learning goal")
-
-    selected_goal = payload.custom_goal or GOAL_BY_KEY[payload.goal_key].label
+    selected_goal = _selected_goal(payload)
+    selected_track = _selected_track(payload)
     if user:
         existing = database.scalar(select(Learner).where(Learner.user_id == user.id))
         if existing:
             ensure_learner_access(existing, user)
+            existing.track = _selected_track(payload, existing)
             existing.name = payload.name
             existing.experience_level = payload.experience_level
             existing.goal_text = selected_goal
             existing.preferred_learning_style = payload.preferred_learning_style
             existing.target_outcome = payload.target_outcome
+            _replace_active_goal(existing, selected_goal, existing.track)
             database.commit()
             database.refresh(existing)
             return existing
@@ -120,14 +158,14 @@ def create_learner(
         name=payload.name,
         experience_level=payload.experience_level,
         goal_text=selected_goal,
-        track="generative_ai",
+        track=selected_track,
         preferred_learning_style=payload.preferred_learning_style,
         target_outcome=payload.target_outcome,
     )
     learner.goals.append(
         LearningGoal(
             title=selected_goal,
-            track="generative_ai",
+            track=selected_track,
             is_active=True,
         )
     )
@@ -160,6 +198,111 @@ def get_skill_analysis(
     return build_skill_analysis(learner_id, skills)
 
 
+@router.post("/learners/{learner_id}/tutor", response_model=TutorResponse)
+def ask_learner_tutor(
+    learner_id: int,
+    payload: TutorRequest,
+    database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+) -> TutorResponse:
+    learner = database.get(Learner, learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Learner not found")
+    ensure_learner_access(learner, user)
+
+    path = database.scalar(
+        select(LearningPath)
+        .where(LearningPath.learner_id == learner_id)
+        .order_by(LearningPath.created_at.desc())
+    )
+    if payload.topic_id:
+        path_topic_ids = {item.get("topic_id") for item in path.path_json} if path else set()
+        if payload.topic_id not in path_topic_ids:
+            raise HTTPException(status_code=404, detail="Tutor topic is not part of the learner's path")
+        topic = database.get(Topic, payload.topic_id)
+        if not topic or (topic.owner_user_id is not None and topic.owner_user_id != learner.user_id):
+            raise HTTPException(status_code=404, detail="Tutor topic is not part of the learner's path")
+    else:
+        current_topic_id = (
+            path.path_json[path.current_index].get("topic_id")
+            if path and path.current_index < len(path.path_json)
+            else None
+        )
+        topic = database.get(Topic, current_topic_id) if current_topic_id else None
+    course = database.scalar(
+        select(GeneratedCourse).where(GeneratedCourse.learner_id == learner_id)
+    )
+    course_topics = [item.get("title", "") for item in path.path_json] if path else []
+    completed_topics = [
+        topic.title
+        for progress in database.scalars(
+            select(TopicProgress).where(
+                TopicProgress.learner_id == learner_id,
+                TopicProgress.status == "completed",
+            )
+        ).all()
+        if (topic := database.get(Topic, progress.topic_id)) is not None
+    ]
+    recent_assessments = [
+        {"topic_id": item.topic_id, "score": item.score}
+        for item in database.scalars(
+            select(Assessment)
+            .where(Assessment.learner_id == learner_id, Assessment.completed_at.is_not(None))
+            .order_by(Assessment.completed_at.desc())
+            .limit(5)
+        ).all()
+    ]
+    question_lower = payload.question.lower()
+    asks_for_module = any(term in question_lower for term in ("course", "module", "lesson"))
+    matching_module = module_matches_question(payload.question, course_topics)
+    module_available = not asks_for_module or matching_module
+
+    weak_concepts = [
+        skill.concept
+        for skill in sorted(
+            database.scalars(select(SkillScore).where(SkillScore.learner_id == learner_id)).all(),
+            key=lambda item: item.score,
+        )
+        if skill.score < 0.75
+    ][:3]
+    tutor_answer, source = answer_tutor_question(
+        learner,
+        topic,
+        payload.question,
+        weak_concepts,
+        course.title if course else None,
+        course_topics,
+        completed_topics,
+        recent_assessments,
+    )
+    return TutorResponse(
+        learner_id=learner_id,
+        topic_id=topic.id if topic else payload.topic_id,
+        topic_title=topic.title if topic else "Current learning topic",
+        answer=tutor_answer.answer,
+        simple_explanation=tutor_answer.simple_explanation,
+        example=tutor_answer.example,
+        coding_example=tutor_answer.coding_example,
+        key_points=tutor_answer.key_points,
+        weak_concepts=weak_concepts,
+        related_topic=tutor_answer.related_topic,
+        suggested_next_action=tutor_answer.suggested_next_action,
+        follow_up=tutor_answer.follow_up,
+        course_title=course.title if course else None,
+        course_connection=(
+            f"No matching module was found in {course.title if course else 'your current learning path'}; no module was invented."
+            if not module_available
+            else f"{topic.title} is part of {course.title} and supports your goal: {learner.goal_text}."
+            if topic and course
+            else f"This explanation is scoped to {topic.title}."
+            if topic
+            else "No course module is currently selected."
+        ),
+        module_title=topic.title if topic and module_available else None,
+        source=source,
+    )
+
+
 @router.get("/learners/{learner_id}/summary", response_model=LearnerSummaryResponse)
 def get_learner_summary(
     learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
@@ -187,22 +330,30 @@ def get_learner_summary(
     total_topics = len(path.path_json) if path else 0
     latest_assessment = database.scalar(
         select(Assessment)
-        .where(Assessment.learner_id == learner_id, Assessment.completed_at.is_not(None), Assessment.topic_id.is_not(None))
+        .where(Assessment.learner_id == learner_id, Assessment.completed_at.is_not(None))
         .order_by(Assessment.completed_at.desc())
     )
     latest_summary = None
-    if latest_assessment and latest_assessment.topic_id:
-        topic = database.get(Topic, latest_assessment.topic_id)
-        if topic and latest_assessment.score is not None:
+    if latest_assessment and latest_assessment.score is not None:
+        topic = database.get(Topic, latest_assessment.topic_id) if latest_assessment.topic_id else None
+        if topic or latest_assessment.assessment_type == "diagnostic":
             latest_summary = LatestAssessmentSummary(
-                topic_id=topic.id,
-                topic_title=topic.title,
+                topic_id=topic.id if topic else None,
+                topic_title=topic.title if topic else "Diagnostic assessment",
                 percentage=round(latest_assessment.score * 100, 1),
             )
-    recommendation_record = database.scalar(
-        select(Recommendation)
-        .where(Recommendation.learner_id == learner_id)
-        .order_by(Recommendation.created_at.desc())
+    path_topic_ids = [item.get("topic_id") for item in path.path_json if item.get("topic_id")] if path else []
+    recommendation_record = (
+        database.scalar(
+            select(Recommendation)
+            .where(
+                Recommendation.learner_id == learner_id,
+                Recommendation.topic_id.in_(path_topic_ids),
+            )
+            .order_by(Recommendation.created_at.desc())
+        )
+        if path_topic_ids
+        else None
     )
     recommendation = None
     if recommendation_record:

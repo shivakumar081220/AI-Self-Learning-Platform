@@ -1,14 +1,14 @@
-import json
 from typing import Any
 
-from openai import OpenAI
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Topic
+from ..models import Assessment, GeneratedCourse, SkillScore, Topic, TopicPrerequisite
 from ..schemas import DiagnosticQuestionSet
+from ..track_catalog import TRACK_BY_ID
+from .ai_provider import request_structured_json
 
 
 CURATED_DIAGNOSTIC_QUESTIONS = [
@@ -119,33 +119,140 @@ CURATED_DIAGNOSTIC_QUESTIONS = [
 ]
 
 
-def _fallback_questions(database: Session, experience_level: str) -> DiagnosticQuestionSet:
+def _fallback_questions(
+    database: Session,
+    experience_level: str,
+    learner_id: int | None = None,
+    track_id: str = "generative_ai",
+) -> DiagnosticQuestionSet:
     available_concepts = {
         concept
-        for topic in database.scalars(select(Topic)).all()
+        for topic in database.scalars(
+            select(Topic).where(
+                or_(
+                    Topic.owner_user_id.is_(None),
+                    and_(
+                        Topic.owner_user_id == learner_id,
+                        Topic.track_id == track_id,
+                        Topic.is_active.is_(True),
+                    ),
+                )
+            )
+        ).all()
         for concept in topic.concept_tags
     }
-    questions = [
-        question
-        for question in CURATED_DIAGNOSTIC_QUESTIONS
-        if question["concept"] in available_concepts
-    ]
+    if track_id == "generative_ai":
+        questions = [
+            question
+            for question in CURATED_DIAGNOSTIC_QUESTIONS
+            if question["concept"] in available_concepts
+        ]
+    else:
+        track = TRACK_BY_ID.get(track_id, TRACK_BY_ID["generative_ai"])
+        concepts = list(available_concepts)[:4]
+        if len(concepts) < 3:
+            concepts = [track_id, f"{track_id}_foundations", f"{track_id}_practice"]
+        questions = []
+        for index, concept in enumerate(concepts[:4]):
+            readable_concept = concept.replace("_", " ")
+            questions.extend(
+                [
+                    {
+                        "id": f"{track_id}-{index}-concept",
+                        "question": f"What is a useful focus when learning {readable_concept} in the {track.name} track?",
+                        "options": [
+                            f"Understand and apply {readable_concept} in a small project",
+                            "Skip the concept and rely on guesswork",
+                            "Treat every result as correct without evaluation",
+                            "Avoid practicing until the final lesson",
+                        ],
+                        "correct_option": 0,
+                        "concept": concept,
+                        "explanation": f"The {track.name} track connects {readable_concept} to practical, evaluated work.",
+                    },
+                    {
+                        "id": f"{track_id}-{index}-practice",
+                        "question": f"Which practice best supports progress with {readable_concept}?",
+                        "options": [
+                            f"Test a focused example and inspect the result",
+                            "Remove all validation from the workflow",
+                            "Use an unrelated topic instead",
+                            "Assume advanced mastery immediately",
+                        ],
+                        "correct_option": 0,
+                        "concept": f"{concept}_practice",
+                        "explanation": "Small evaluated practice makes gaps visible and guides the next learning decision.",
+                    },
+                ]
+            )
+        for index, question in enumerate(questions):
+            if index % 2:
+                question["options"][0], question["options"][1] = question["options"][1], question["options"][0]
+                question["correct_option"] = 1
     if experience_level == "advanced":
         questions = questions[1:] + questions[:1]
     return DiagnosticQuestionSet.model_validate({"questions": questions})
 
 
-def _openai_questions(learner: Any, database: Session) -> DiagnosticQuestionSet:
-    topic_context = [
-        {"id": topic.id, "concepts": topic.concept_tags, "description": topic.description}
-        for topic in database.scalars(select(Topic)).all()
+def _openrouter_questions(learner: Any, database: Session) -> DiagnosticQuestionSet:
+    catalog = database.scalars(
+        select(Topic).where(
+            or_(
+                Topic.owner_user_id.is_(None),
+                and_(
+                    Topic.owner_user_id == learner.user_id,
+                    Topic.track_id == learner.track,
+                    Topic.is_active.is_(True),
+                ),
+            )
+        )
+    ).all()
+    available_concepts = {concept for topic in catalog for concept in topic.concept_tags}
+    prerequisites = database.scalars(select(TopicPrerequisite)).all()
+    prerequisites_by_topic: dict[str, list[str]] = {}
+    for edge in prerequisites:
+        prerequisites_by_topic.setdefault(edge.topic_id, []).append(edge.prerequisite_id)
+    course = database.scalar(
+        select(GeneratedCourse).where(GeneratedCourse.learner_id == learner.id)
+    )
+    course_topics = [
+        {
+            "title": topic.title,
+            "concepts": topic.concept_tags,
+            "prerequisites": prerequisites_by_topic.get(topic.id, []),
+        }
+        for topic in catalog
+        if course and course.track_id == learner.track and topic.course_id == course.id
     ]
-    prompt = {
+    weak_concepts = [
+        item.concept
+        for item in database.scalars(
+            select(SkillScore).where(
+                SkillScore.learner_id == learner.id,
+                SkillScore.score < 0.75,
+            )
+        ).all()
+    ]
+    latest_diagnostic = database.scalar(
+        select(Assessment)
+        .where(
+            Assessment.learner_id == learner.id,
+            Assessment.assessment_type == "diagnostic",
+            Assessment.completed_at.is_not(None),
+        )
+        .order_by(Assessment.completed_at.desc())
+    )
+    context = {
         "learner": {
             "experience_level": learner.experience_level,
             "goal": learner.goal_text,
+            "target_outcome": learner.target_outcome,
+            "track": learner.track,
+            "weak_concepts": weak_concepts,
+            "previous_diagnostic_score": latest_diagnostic.score if latest_diagnostic else None,
         },
-        "topic_catalog": topic_context,
+        "course_topics": course_topics,
+        "available_concepts": sorted(available_concepts),
         "requirements": {
             "question_count": 8,
             "question_type": "MCQ",
@@ -153,39 +260,34 @@ def _openai_questions(learner: Any, database: Session) -> DiagnosticQuestionSet:
             "internal_metadata": ["concept", "correct_option", "explanation"],
         },
     }
-    client = OpenAI(
-        api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_base_url,
-    )
-    response = client.chat.completions.create(
-        model=settings.openrouter_model,
+    question_set = request_structured_json(
+        system_prompt=(
+            "Create rigorous diagnostic MCQs for the learner's selected AI track. Return a questions array. "
+            "Use only concepts from available_concepts, align questions to the learner's goal and level, "
+            "and keep correct_option zero-based. The answer key is server-side metadata."
+        ),
+        user_payload={"schema": DiagnosticQuestionSet.model_json_schema(), "context": context},
+        response_model=DiagnosticQuestionSet,
         temperature=0.2,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You create rigorous diagnostic MCQs for a Generative AI learner. "
-                    "Return only valid JSON with a questions array. Use only concepts present "
-                    "in the supplied topic catalog. Keep correct_option zero-based."
-                ),
-            },
-            {"role": "user", "content": json.dumps(prompt)},
-        ],
+        max_tokens=2800,
     )
-    content = response.choices[0].message.content
-    if not content:
-        raise ValueError("OpenAI returned an empty diagnostic")
-    return DiagnosticQuestionSet.model_validate_json(content)
+    if any(question.concept not in available_concepts for question in question_set.questions):
+        raise ValueError("Diagnostic contains a concept outside the topic catalog")
+    return question_set
 
 
 def generate_diagnostic(learner: Any, database: Session) -> tuple[DiagnosticQuestionSet, str]:
     if settings.openrouter_api_key:
         try:
-            return _openai_questions(learner, database), "openai"
+            return _openrouter_questions(learner, database), "openrouter"
         except (Exception, ValidationError):
             pass
-    return _fallback_questions(database, learner.experience_level), "curated_fallback"
+    return _fallback_questions(
+        database,
+        learner.experience_level,
+        learner.user_id,
+        learner.track,
+    ), "curated_fallback"
 
 
 def score_diagnostic(

@@ -15,13 +15,19 @@ backend/*.sqlite3
 *.sqlite3
 
 node_modules/
+dist/
+build/
 frontend/dist/
 frontend/.vite/
 npm-debug.log*
+*.log
+coverage/
+.idea/
 
 .env
 .env.*
 !.env.example
 
 .DS_Store
+Thumbs.db
 .vscode/settings.json

@@ -15,8 +15,14 @@ bearer = HTTPBearer(auto_error=False)
 
 
 def _require_jwt_secret() -> str:
-    if not settings.jwt_secret_key:
-        raise RuntimeError("JWT_SECRET_KEY is required for authenticated operations")
+    if not settings.jwt_secret_key.strip():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Authentication is not configured. Copy .env.example to .env in the project root "
+                "or backend folder and set JWT_SECRET_KEY to a long random secret."
+            ),
+        )
     return settings.jwt_secret_key
 
 

@@ -5,7 +5,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Assessment, Learner, LearningPath, Recommendation, SkillScore, Topic, TopicProgress, Weakness
-from ..schemas import AssessmentAnswer, AssessmentQuestionSet, AssessmentResultResponse, ConceptResult, RecommendationResponse
+from ..schemas import (
+    AssessmentAnswer,
+    AssessmentQuestionSet,
+    AssessmentResultResponse,
+    ConceptResult,
+    QuestionReviewItem,
+    RecommendationResponse,
+)
+from .learning_ai_service import generate_remediation_aid
 from .path_engine import generate_path_plan
 
 
@@ -192,6 +200,29 @@ def _recommendation(
     )
 
 
+def _build_question_review(
+    question_set: AssessmentQuestionSet,
+    answers: list[AssessmentAnswer],
+) -> list[QuestionReviewItem]:
+    answer_by_id = {answer.question_id: answer for answer in answers}
+    review_items: list[QuestionReviewItem] = []
+    for question in question_set.questions:
+        answer = answer_by_id.get(question.question_id)
+        review_items.append(
+            QuestionReviewItem(
+                question_id=question.question_id,
+                question=question.question,
+                options=question.options,
+                selected_option=answer.selected_option if answer else None,
+                correct_option=question.correct_option,
+                is_correct=bool(answer and answer.selected_option == question.correct_option),
+                concept=question.concept,
+                explanation=question.explanation,
+            )
+        )
+    return review_items
+
+
 def apply_assessment_result(
     database: Session,
     assessment: Assessment,
@@ -257,6 +288,24 @@ def apply_assessment_result(
     recommendation = _recommendation(
         action_type, topic, weak_concepts, target_topic_id, target_topic_title
     )
+    if action_type in {"remediate", "practice"}:
+        remediation_aid, remediation_source = generate_remediation_aid(
+            learner,
+            topic,
+            weak_concepts,
+            percentage,
+            recommendation.remediation,
+        )
+        recommendation.remediation = remediation_aid.explanation
+        recommendation.practice_suggestion = remediation_aid.practice_suggestion
+        recommendation.remediation_source = remediation_source
+        assessment.feedback_json = {
+            **(assessment.feedback_json or {}),
+            "remediation": {
+                **remediation_aid.model_dump(),
+                "source": remediation_source,
+            },
+        }
     database.add(
         Recommendation(
             learner_id=learner.id,
@@ -279,4 +328,5 @@ def apply_assessment_result(
         weak_concepts=weak_concepts,
         strong_concepts=strong_concepts,
         recommendation=recommendation,
+        question_review=_build_question_review(question_set, answers),
     )

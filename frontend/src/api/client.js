@@ -33,6 +33,10 @@ export function getGoals() {
   return request("/goals");
 }
 
+export function getTracks() {
+  return request("/tracks");
+}
+
 export function registerAccount(payload) {
   return request("/auth/register", { method: "POST", body: JSON.stringify(payload) });
 }
@@ -72,6 +76,10 @@ export function submitDiagnostic(learnerId, assessmentId, answers) {
   });
 }
 
+export function getDiagnosticResult(learnerId, assessmentId) {
+  return request(`/learners/${learnerId}/diagnostic/${assessmentId}`);
+}
+
 export function getSkillAnalysis(learnerId) {
   return request(`/learners/${learnerId}/skills`);
 }
@@ -106,6 +114,13 @@ export function generateAssessment(learnerId, topicId) {
 
 export function getAssessment(learnerId, assessmentId) {
   return request(`/learners/${learnerId}/assessments/${assessmentId}`);
+}
+
+export function askTutor(learnerId, payload) {
+  return request(`/learners/${learnerId}/tutor`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function submitAssessment(learnerId, assessmentId, answers) {

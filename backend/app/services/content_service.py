@@ -1,14 +1,13 @@
-import json
 from typing import Any
 
-from openai import OpenAI
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Assessment, Learner, SkillScore, Topic, TopicProgress, Weakness
-from ..schemas import LearningContent
+from ..models import Assessment, Learner, SkillScore, Topic, TopicPrerequisite, TopicProgress
+from ..schemas import CodingExample, LearningContent
+from .ai_provider import request_structured_json
 
 
 CURATED_CONTENT: dict[str, dict[str, Any]] = {
@@ -247,7 +246,83 @@ CURATED_CONTENT: dict[str, dict[str, Any]] = {
 }
 
 
-def _fallback_content(topic: Topic, learner: Learner, weak_concepts: list[str]) -> LearningContent:
+def _is_technical_topic(topic: Topic) -> bool:
+    text = " ".join([topic.title, topic.description, *topic.concept_tags]).lower()
+    return "ai" in topic.title.lower().split() or any(
+        term in text
+        for term in ("python", "prompt", "embedding", "vector", "retriev", "rag", "agent", "tool", "llm", "evaluation", "api", "code")
+    )
+
+
+def _fallback_coding_example(topic: Topic) -> CodingExample:
+    text = " ".join([topic.title, *topic.concept_tags]).lower()
+    if "embedding" in text or "vector" in text:
+        code = (
+            "from math import sqrt\n\n"
+            "query = [1.0, 0.0]\n"
+            "candidate = [0.8, 0.2]\n"
+            "dot = sum(left * right for left, right in zip(query, candidate))\n"
+            "norm = sqrt(sum(value * value for value in query) * sum(value * value for value in candidate))\n"
+            "print(round(dot / norm, 2))"
+        )
+        output = "0.97"
+        explanation = "The dot product divided by both vector lengths estimates their cosine similarity."
+        mistake = "Comparing vectors with different dimensions or forgetting to normalize the dot product."
+    elif "prompt" in text:
+        code = (
+            'task = "Summarize the support request"\n'
+            'constraints = ["Use two bullets", "Do not invent policy"]\n'
+            'prompt = f"{task}. Constraints: {\'; \'.join(constraints)}"\n'
+            "print(prompt)"
+        )
+        output = "Summarize the support request. Constraints: Use two bullets; Do not invent policy"
+        explanation = "The example makes task and constraints explicit before a model call."
+        mistake = "Giving a vague task without specifying boundaries or the response format."
+    elif "retriev" in text or "rag" in text:
+        code = (
+            'documents = ["Refunds take five days", "Shipping takes two days"]\n'
+            'query = "refund timing"\n'
+            'matches = [doc for doc in documents if "refund" in doc.lower()]\n'
+            "print(matches[0])"
+        )
+        output = "Refunds take five days"
+        explanation = "This toy retrieval step selects candidate context before generation."
+        mistake = "Treating a keyword match as proof the retrieved statement fully answers the question."
+    elif "agent" in text or "tool" in text:
+        code = (
+            'tools = {"search": lambda query: f"Results for: {query}"}\n'
+            'requested_tool = "search"\n'
+            'if requested_tool in tools:\n'
+            '    print(tools[requested_tool]("vector databases"))'
+        )
+        output = "Results for: vector databases"
+        explanation = "The application checks the requested tool against an allowlist before calling it."
+        mistake = "Executing a model-proposed tool name or arguments without application validation."
+    else:
+        code = (
+            'messages = [{"role": "user", "content": "Explain one useful LLM pattern."}]\n'
+            'assert messages[0]["role"] == "user"\n'
+            'print(messages[0]["content"])'
+        )
+        output = "Explain one useful LLM pattern."
+        explanation = "A message object keeps user input explicit and separate from application rules."
+        mistake = "Sending unvalidated user input as trusted system instructions."
+    return CodingExample(
+        title=f"Try {topic.title} in Python",
+        code=code,
+        explanation=explanation,
+        expected_output=output,
+        why_it_matters=f"A small executable model makes the core idea in {topic.title} concrete.",
+        common_mistake=mistake,
+    )
+
+
+def _fallback_content(
+    topic: Topic,
+    learner: Learner,
+    weak_concepts: list[str],
+    prerequisites: list[str],
+) -> LearningContent:
     data = CURATED_CONTENT.get(topic.id)
     if not data:
         data = {
@@ -274,7 +349,21 @@ def _fallback_content(topic: Topic, learner: Learner, weak_concepts: list[str]) 
         ) + ", because those concepts are currently developing for you."
     if learner.experience_level == "advanced":
         explanation += " At an advanced level, focus on the trade-offs between quality, control, and system complexity."
-    return LearningContent.model_validate({"topic_id": topic.id, "topic_title": topic.title, **data, "explanation": explanation})
+    payload = {
+        "topic_id": topic.id,
+        "topic_title": topic.title,
+        **data,
+        "explanation": explanation,
+        "real_world_example": data.get("real_world_example", data["practical_example"]),
+        "prerequisites": prerequisites,
+        "practice_suggestion": data.get(
+            "practice_suggestion",
+            f"Explain {topic.title} in your own words, then apply it to {learner.goal_text}.",
+        ),
+    }
+    if _is_technical_topic(topic):
+        payload["coding_example"] = _fallback_coding_example(topic).model_dump()
+    return LearningContent.model_validate(payload)
 
 
 def _openrouter_content(
@@ -283,11 +372,14 @@ def _openrouter_content(
     weak_concepts: list[str],
     completed_topics: list[str],
     recent_assessments: list[dict[str, Any]],
+    prerequisites: list[str],
 ) -> LearningContent:
     context = {
         "learner": {
             "experience_level": learner.experience_level,
             "goal": learner.goal_text,
+            "target_outcome": learner.target_outcome,
+            "track_id": learner.track,
             "weak_concepts": weak_concepts,
             "completed_topics": completed_topics,
             "recent_assessments": recent_assessments,
@@ -298,35 +390,35 @@ def _openrouter_content(
             "description": topic.description,
             "concepts": topic.concept_tags,
         },
+        "prerequisites": prerequisites,
     }
-    client = OpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url)
-    response = client.chat.completions.create(
-        model=settings.openrouter_model,
+    parsed = request_structured_json(
+        system_prompt=(
+            "You are a careful Generative AI instructor. Teach only the supplied current topic. "
+            "Adapt depth to experience, goal, and weak concepts. Include a short real-world example, "
+            "a targeted practice suggestion, and the supplied prerequisites. For technical AI topics, "
+            "include a structured Python coding example with title, code, explanation, expected output "
+            "when useful, why it matters, and a common mistake. Return JSON matching the requested "
+            "learning-content schema. Keep topic_id and topic_title exactly equal to the supplied values. "
+            "Do not invent topic IDs or unrelated curriculum topics."
+        ),
+        user_payload={"schema": LearningContent.model_json_schema(), "context": context},
+        response_model=LearningContent,
         temperature=0.3,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a careful Generative AI instructor. Teach only the supplied current topic. "
-                    "Adapt depth to experience and address weak concepts. Return only JSON matching the "
-                    "requested learning-content schema. Keep topic_id exactly equal to the supplied ID. "
-                    "Do not invent topic IDs or unrelated curriculum topics."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps({"schema": LearningContent.model_json_schema(), "context": context}),
-            },
-        ],
+        max_tokens=3500,
     )
-    content = response.choices[0].message.content
-    if not content:
-        raise ValueError("OpenRouter returned empty learning content")
-    parsed = LearningContent.model_validate_json(content)
     if parsed.topic_id != topic.id or parsed.topic_title != topic.title:
         raise ValueError("AI content topic does not match the curated topic")
-    return parsed
+    if not parsed.real_world_example or not parsed.practice_suggestion:
+        raise ValueError("AI lesson is missing required learning guidance")
+    if _is_technical_topic(topic) and not parsed.coding_example:
+        raise ValueError("AI lesson is missing its required coding example")
+    return parsed.model_copy(
+        update={
+            "prerequisites": prerequisites,
+            "code_example": parsed.code_example or (parsed.coding_example.code if parsed.coding_example else None),
+        }
+    )
 
 
 def generate_learning_content(
@@ -335,13 +427,21 @@ def generate_learning_content(
     database: Session,
 ) -> tuple[LearningContent, str]:
     skills = database.scalars(select(SkillScore).where(SkillScore.learner_id == learner.id)).all()
-    weak_concepts = [
-        skill.concept for skill in skills if skill.score < 0.5 and skill.concept in topic.concept_tags
-    ]
+    weak_concepts = [skill.concept for skill in skills if skill.score < 0.75]
     progress = database.scalars(
         select(TopicProgress).where(TopicProgress.learner_id == learner.id)
     ).all()
-    completed_topics = [item.topic_id for item in progress if item.status == "completed"]
+    completed_topics = [
+        database.get(Topic, item.topic_id).title
+        for item in progress
+        if item.status == "completed" and database.get(Topic, item.topic_id)
+    ]
+    prerequisite_topics = database.scalars(
+        select(Topic)
+        .join(TopicPrerequisite, TopicPrerequisite.prerequisite_id == Topic.id)
+        .where(TopicPrerequisite.topic_id == topic.id)
+    ).all()
+    prerequisites = [item.title for item in prerequisite_topics]
     assessments = database.scalars(
         select(Assessment).where(Assessment.learner_id == learner.id).order_by(Assessment.created_at.desc()).limit(5)
     ).all()
@@ -353,9 +453,11 @@ def generate_learning_content(
     if settings.openrouter_api_key:
         try:
             return (
-                _openrouter_content(topic, learner, weak_concepts, completed_topics, recent_assessments),
+                _openrouter_content(
+                    topic, learner, weak_concepts, completed_topics, recent_assessments, prerequisites
+                ),
                 "openrouter",
             )
         except (Exception, ValidationError):
             pass
-    return _fallback_content(topic, learner, weak_concepts), "curated_fallback"
+    return _fallback_content(topic, learner, weak_concepts, prerequisites), "curated_fallback"

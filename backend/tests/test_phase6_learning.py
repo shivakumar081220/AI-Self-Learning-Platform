@@ -12,7 +12,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import Learner, LearningPath, SkillScore, TopicProgress
 from app.seed_topics import seed_topics
-from app.services import content_service
+from app.services import ai_provider, content_service
 from app.services.content_service import CURATED_CONTENT
 from app.services.path_engine import generate_path_plan
 from app.schemas import LearningContent
@@ -67,7 +67,24 @@ def create_learner_and_path(client: TestClient) -> tuple[dict, dict]:
 
 def fallback_content(topic_id: str, title: str) -> str:
     data = CURATED_CONTENT[topic_id]
-    return json.dumps({"topic_id": topic_id, "topic_title": title, **data})
+    return json.dumps(
+        {
+            "topic_id": topic_id,
+            "topic_title": title,
+            **data,
+            "real_world_example": data["practical_example"],
+            "practice_suggestion": "Explain the idea and test it with one example.",
+            "prerequisites": [],
+            "coding_example": {
+                "title": "Inspect a message",
+                "code": "message = {'role': 'user'}\nprint(message['role'])",
+                "explanation": "A small structured value makes the concept concrete.",
+                "expected_output": "user",
+                "why_it_matters": "Small examples make abstract implementation details easier to inspect.",
+                "common_mistake": "Assuming a structured value is valid without checking its fields.",
+            },
+        }
+    )
 
 
 def test_current_topic_and_unknown_learner(client: TestClient):
@@ -90,6 +107,9 @@ def test_valid_topic_returns_curated_fallback_and_starts_progress(client: TestCl
     assert response.status_code == 200
     assert response.json()["source"] == "curated_fallback"
     assert response.json()["content"]["topic_id"] == path["current_topic_id"]
+    if "ai" in path["topics"][path["current_index"]]["title"].lower():
+        assert response.json()["content"]["coding_example"]["code"]
+        assert response.json()["content"]["practice_suggestion"]
     with Session(app.state.phase6_test_engine) as database:
         progress = database.scalar(
             select(TopicProgress).where(
@@ -126,7 +146,7 @@ def test_mocked_openrouter_content_uses_learner_context(client: TestClient, monk
     FakeContentProvider.response_content = fallback_content(topic_id, title)
     FakeContentProvider.captured_messages = []
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
-    monkeypatch.setattr(content_service, "OpenAI", FakeContentProvider)
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeContentProvider)
     with Session(app.state.phase6_test_engine) as database:
         database.add(
             SkillScore(
@@ -159,7 +179,7 @@ def test_provider_failure_invalid_output_and_missing_key_fallback(
     topic_id = path["current_topic_id"]
     title = path["topics"][path["current_index"]]["title"]
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
-    monkeypatch.setattr(content_service, "OpenAI", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(ai_provider, "OpenAI", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("down")))
 
     failed = client.post(
         f"/api/learners/{learner['id']}/topics/{topic_id}/content/generate"
@@ -170,7 +190,7 @@ def test_provider_failure_invalid_output_and_missing_key_fallback(
     FakeContentProvider.response_content = json.dumps(
         {"topic_id": "arbitrary-topic", "topic_title": title, **CURATED_CONTENT[topic_id]}
     )
-    monkeypatch.setattr(content_service, "OpenAI", FakeContentProvider)
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeContentProvider)
     invalid = client.post(
         f"/api/learners/{learner['id']}/topics/{topic_id}/content/generate"
     )

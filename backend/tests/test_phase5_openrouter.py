@@ -13,7 +13,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import Learner
 from app.seed_topics import seed_topics
-from app.services import diagnostic_service
+from app.services import ai_provider, diagnostic_service
 from app.services.diagnostic_service import CURATED_DIAGNOSTIC_QUESTIONS
 
 
@@ -84,12 +84,14 @@ def test_openrouter_configuration_loads_from_environment(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("OPENROUTER_BASE_URL", "https://router.example/v1")
     monkeypatch.setenv("OPENROUTER_MODEL", "router/test-model")
+    monkeypatch.setenv("OPENROUTER_TIMEOUT_SECONDS", "12.5")
 
     configured = Settings()
 
     assert configured.openrouter_api_key == "test-key"
     assert configured.openrouter_base_url == "https://router.example/v1"
     assert configured.openrouter_model == "router/test-model"
+    assert configured.openrouter_timeout_seconds == 12.5
 
 
 def test_openrouter_client_uses_configured_provider(monkeypatch, database: Session):
@@ -97,15 +99,16 @@ def test_openrouter_client_uses_configured_provider(monkeypatch, database: Sessi
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
     monkeypatch.setattr(settings, "openrouter_base_url", "https://router.example/v1")
     monkeypatch.setattr(settings, "openrouter_model", "router/test-model")
-    monkeypatch.setattr(diagnostic_service, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeOpenAI)
 
     question_set, generated_by = diagnostic_service.generate_diagnostic(learner, database)
 
-    assert generated_by == "openai"
+    assert generated_by == "openrouter"
     assert len(question_set.questions) == 8
     assert FakeOpenAI.constructor_args == {
         "api_key": "test-key",
         "base_url": "https://router.example/v1",
+        "timeout": settings.openrouter_timeout_seconds,
     }
 
 
@@ -116,7 +119,7 @@ def test_provider_error_uses_fallback_without_logging_key(monkeypatch, caplog, d
         raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
-    monkeypatch.setattr(diagnostic_service, "OpenAI", failing_provider)
+    monkeypatch.setattr(ai_provider, "OpenAI", failing_provider)
     question_set, generated_by = diagnostic_service.generate_diagnostic(learner, database)
 
     assert generated_by == "curated_fallback"
@@ -128,7 +131,7 @@ def test_invalid_structured_output_uses_fallback(monkeypatch, database: Session)
     learner = database.query(Learner).first()
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
     FakeOpenAI.response_content = json.dumps({"questions": []})
-    monkeypatch.setattr(diagnostic_service, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeOpenAI)
 
     _, generated_by = diagnostic_service.generate_diagnostic(learner, database)
 
@@ -138,7 +141,7 @@ def test_invalid_structured_output_uses_fallback(monkeypatch, database: Session)
 
 def test_api_response_never_returns_provider_key(monkeypatch, client: TestClient):
     monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
-    monkeypatch.setattr(diagnostic_service, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeOpenAI)
     learner = client.post(
         "/api/learners",
         json={

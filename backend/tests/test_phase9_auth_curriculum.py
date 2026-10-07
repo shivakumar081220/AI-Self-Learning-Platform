@@ -94,6 +94,10 @@ def test_generated_curriculum_is_persisted_and_path_uses_generated_topics(client
     first = client.post("/api/curriculum/generate", headers=headers).json()
     second = client.post("/api/curriculum/generate", headers=headers).json()
     assert first["course_id"] == second["course_id"]
+    assert first["source"] == "persisted"
+    assert first["generation_source"] == "deterministic_fallback"
+    assert second["source"] == "persisted"
+    assert second["generation_source"] == "deterministic_fallback"
 
     path = client.post(f"/api/learners/{learner['id']}/learning-path/generate", headers=headers)
     assert path.status_code == 200

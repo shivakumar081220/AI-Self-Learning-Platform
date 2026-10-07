@@ -1,7 +1,5 @@
-import json
 from typing import Any
 
-from openai import OpenAI
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import Topic
 from ..schemas import AssessmentQuestionSet
+from .ai_provider import request_structured_json
 
 
 QUESTION_BANK: dict[str, list[dict[str, Any]]] = {
@@ -60,54 +59,141 @@ QUESTION_BANK: dict[str, list[dict[str, Any]]] = {
 }
 
 
-def _fallback_questions(topic: Topic) -> AssessmentQuestionSet:
-    questions = QUESTION_BANK.get(topic.id, [])
+def _question_fingerprint(question: str) -> str:
+    return " ".join(question.lower().split())
+
+
+def _fallback_questions(
+    topic: Topic, previous_questions: list[dict[str, Any]] | None = None
+) -> AssessmentQuestionSet:
+    previous_questions = previous_questions or []
+    previous_ids = {item.get("question_id") for item in previous_questions}
+    seen_questions = {
+        _question_fingerprint(item.get("question", ""))
+        for item in previous_questions
+    }
+    questions = [
+        question
+        for question in QUESTION_BANK.get(topic.id, [])
+        if question["question_id"] not in previous_ids
+        and _question_fingerprint(question["question"]) not in seen_questions
+    ][:3]
     if len(questions) < 3:
-        questions = [
-            {
-                "question_id": f"{topic.id}-concept-{index}",
-                "question": f"Which idea is central to {topic.title}?",
-                "options": [topic.description, "It requires no data", "It replaces validation", "It is unrelated to AI"],
-                "concept": concept,
-                "difficulty": topic.difficulty,
-                "correct_option": 0,
-                "explanation": topic.description,
-            }
-            for index, concept in enumerate(topic.concept_tags[:3], start=1)
+        concepts = topic.concept_tags or [topic.title.lower().replace(" ", "_")]
+        templates = [
+            "What is the main idea in {title}?",
+            "Which statement best describes {title}?",
+            "Which principle should guide work with {title}?",
+            "How does {concept} support {title}?",
+            "Which example best demonstrates {concept} in {title}?",
+            "What should you verify when applying {concept} to {title}?",
+            "Which outcome shows {concept} is being used appropriately in {title}?",
+            "What is a useful first step when working with {concept} in {title}?",
+            "Which limitation should you remember about {concept} in {title}?",
+            "How can you check your understanding of {concept} in {title}?",
+            "What role does {concept} play in {title}?",
+            "Which practice helps apply {concept} to {title}?",
         ]
+        retry_number = len(previous_questions) // 3 + 1
+        template_offset = (retry_number - 1) * 3
+        candidate_number = 0
+        while len(questions) < 3:
+            concept = concepts[(retry_number + candidate_number) % len(concepts)]
+            concept_text = concept.replace("_", " ")
+            template_index = (template_offset + candidate_number) % len(templates)
+            question_text = templates[template_index].format(
+                title=topic.title,
+                concept=concept_text,
+            )
+            fingerprint = _question_fingerprint(question_text)
+            if fingerprint in seen_questions:
+                candidate_number += 1
+                if candidate_number > len(templates) * 2:
+                    question_text = f"{question_text} Try {retry_number + candidate_number}."
+                    fingerprint = _question_fingerprint(question_text)
+            if fingerprint in seen_questions:
+                candidate_number += 1
+                continue
+            seen_questions.add(fingerprint)
+            questions.append(
+                {
+                    "question_id": f"{topic.id}-retry-{retry_number}-{candidate_number + 1}",
+                    "question": question_text,
+                    "options": [topic.description, "It requires no data", "It replaces validation", "It is unrelated to AI"],
+                    "concept": concepts[(retry_number + candidate_number) % len(concepts)],
+                    "difficulty": topic.difficulty,
+                    "correct_option": 0,
+                    "explanation": topic.description,
+                }
+            )
+            candidate_number += 1
     return AssessmentQuestionSet.model_validate({"questions": questions})
 
 
-def _openrouter_questions(topic: Topic, learner: Any) -> AssessmentQuestionSet:
-    prompt = {
-        "learner": {"experience_level": learner.experience_level, "goal": learner.goal_text},
-        "topic": {"id": topic.id, "title": topic.title, "description": topic.description, "concepts": topic.concept_tags},
+def _openrouter_questions(
+    topic: Topic,
+    learner: Any,
+    weak_concepts: list[str],
+    previous_questions: list[dict[str, Any]],
+) -> AssessmentQuestionSet:
+    context = {
+        "learner": {
+            "experience_level": learner.experience_level,
+            "goal": learner.goal_text,
+            "target_outcome": learner.target_outcome,
+            "weak_concepts": weak_concepts,
+        },
+        "topic": {
+            "id": topic.id,
+            "title": topic.title,
+            "description": topic.description,
+            "concepts": topic.concept_tags,
+            "difficulty": topic.difficulty,
+        },
         "requirements": {"question_count": 3, "question_type": "MCQ", "difficulty": topic.difficulty},
-    }
-    client = OpenAI(api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url)
-    response = client.chat.completions.create(
-        model=settings.openrouter_model,
-        temperature=0.2,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": "Create MCQs only for the supplied Generative AI topic. Return JSON with a questions array. Use only the supplied concept tags and topic ID context. Keep correct_option zero-based."},
-            {"role": "user", "content": json.dumps({"schema": AssessmentQuestionSet.model_json_schema(), "context": prompt})},
+        "previous_questions_to_avoid": [
+            item.get("question", "") for item in previous_questions
         ],
+        "schema": AssessmentQuestionSet.model_json_schema(),
+    }
+    parsed = request_structured_json(
+        system_prompt=(
+            "Create rigorous MCQs only for the supplied Generative AI topic. Use only the supplied concept tags, "
+            "adapt difficulty to the learner, avoid repeating any previous question or scenario, and keep correct_option zero-based."
+        ),
+        user_payload=context,
+        response_model=AssessmentQuestionSet,
+        temperature=0.2,
+        max_tokens=1800,
     )
-    content = response.choices[0].message.content
-    if not content:
-        raise ValueError("OpenRouter returned empty assessment content")
-    parsed = AssessmentQuestionSet.model_validate_json(content)
     allowed_concepts = set(topic.concept_tags)
     if any(question.concept not in allowed_concepts for question in parsed.questions):
         raise ValueError("Assessment contains a concept outside the topic catalog")
+    previous_fingerprints = {
+        _question_fingerprint(item.get("question", ""))
+        for item in previous_questions
+    }
+    if any(
+        _question_fingerprint(question.question) in previous_fingerprints
+        for question in parsed.questions
+    ):
+        raise ValueError("Assessment repeats a previous question")
     return parsed
 
 
-def generate_assessment_questions(topic: Topic, learner: Any) -> tuple[AssessmentQuestionSet, str]:
+def generate_assessment_questions(
+    topic: Topic,
+    learner: Any,
+    weak_concepts: list[str] | None = None,
+    previous_questions: list[dict[str, Any]] | None = None,
+) -> tuple[AssessmentQuestionSet, str]:
+    previous_questions = previous_questions or []
     if settings.openrouter_api_key:
         try:
-            return _openrouter_questions(topic, learner), "openrouter"
+            return (
+                _openrouter_questions(topic, learner, weak_concepts or [], previous_questions),
+                "openrouter",
+            )
         except (Exception, ValidationError):
             pass
-    return _fallback_questions(topic), "curated_fallback"
+    return _fallback_questions(topic, previous_questions), "curated_fallback"

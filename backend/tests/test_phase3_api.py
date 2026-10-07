@@ -141,7 +141,7 @@ def test_ai_failure_uses_curated_fallback(monkeypatch, client: TestClient):
     monkeypatch.setattr(diagnostic_service.settings, "openrouter_api_key", "test-key")
     monkeypatch.setattr(
         diagnostic_service,
-        "_openai_questions",
+        "_openrouter_questions",
         lambda learner, database: (_ for _ in ()).throw(RuntimeError("timeout")),
     )
 
