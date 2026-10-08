@@ -51,20 +51,30 @@ def client(tmp_path) -> Generator[TestClient, None, None]:
 
 
 class FakeOpenAI:
-    response_content = json.dumps({"questions": CURATED_DIAGNOSTIC_QUESTIONS})
+    response_content = json.dumps(
+        {
+            "questions": [
+                {**question, "difficulty": "beginner"}
+                for question in CURATED_DIAGNOSTIC_QUESTIONS
+            ]
+        }
+    )
     constructor_args: dict[str, str] = {}
 
     def __init__(self, **kwargs):
         self.constructor_args = kwargs
         FakeOpenAI.constructor_args = kwargs
         self.chat = SimpleNamespace(
-            completions=SimpleNamespace(create=self.create_completion)
+            completions=SimpleNamespace(
+                with_raw_response=SimpleNamespace(create=self.create_raw_response)
+            )
         )
 
-    def create_completion(self, **kwargs):
-        return SimpleNamespace(
+    def create_raw_response(self, **kwargs):
+        response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=self.response_content))]
         )
+        return SimpleNamespace(status_code=200, parse=lambda: response)
 
 
 def test_application_starts_without_api_key(monkeypatch):
@@ -110,6 +120,58 @@ def test_openrouter_client_uses_configured_provider(monkeypatch, database: Sessi
         "base_url": "https://router.example/v1",
         "timeout": settings.openrouter_timeout_seconds,
     }
+
+
+def test_diagnostic_endpoint_reuses_pending_assessment_and_hides_answer_key(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    learner = client.post(
+        "/api/learners",
+        json={
+            "name": "Diagnostic Cache",
+            "experience_level": "beginner",
+            "goal_key": "llm_apps",
+        },
+    ).json()
+
+    first = client.post(f"/api/learners/{learner['id']}/diagnostic")
+    second = client.post(f"/api/learners/{learner['id']}/diagnostic")
+
+    assert first.status_code == second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["assessment_id"] == second_body["assessment_id"]
+    assert first_body["generated_by"] == second_body["generated_by"] == "curated_fallback"
+    assert len(first_body["questions"]) == 8
+    assert all("concept" in item and "difficulty" in item for item in first_body["questions"])
+    assert all("correct_option" not in item and "explanation" not in item for item in first_body["questions"])
+
+
+def test_diagnostic_rejects_concepts_outside_catalog(monkeypatch, caplog, database: Session):
+    learner = database.query(Learner).first()
+    invalid_questions = [
+        {**question, "difficulty": "beginner"}
+        for question in CURATED_DIAGNOSTIC_QUESTIONS
+    ]
+    invalid_questions[0]["concept"] = "invented_concept_id"
+    FakeOpenAI.response_content = json.dumps({"questions": invalid_questions})
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(ai_provider, "OpenAI", FakeOpenAI)
+
+    question_set, generated_by = diagnostic_service.generate_diagnostic(learner, database)
+
+    assert generated_by == "curated_fallback"
+    assert len(question_set.questions) == 8
+    assert "validation_error=unknown_concept" in caplog.text
+    FakeOpenAI.response_content = json.dumps(
+        {
+            "questions": [
+                {**question, "difficulty": "beginner"}
+                for question in CURATED_DIAGNOSTIC_QUESTIONS
+            ]
+        }
+    )
 
 
 def test_provider_error_uses_fallback_without_logging_key(monkeypatch, caplog, database: Session):

@@ -27,13 +27,14 @@ class GeneratedCourse(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id"), unique=True, index=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id"), index=True)
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text)
     goal: Mapped[str] = mapped_column(Text)
     target_outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     level: Mapped[str] = mapped_column(String(30))
     estimated_duration: Mapped[str] = mapped_column(String(80))
+    learning_objectives_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     track_id: Mapped[str] = mapped_column(String(50), default="generative_ai")
     track_history_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     generation_source: Mapped[str] = mapped_column(String(30), default="unknown")
@@ -43,7 +44,25 @@ class GeneratedCourse(Base):
     )
 
     topics: Mapped[list["Topic"]] = relationship(back_populates="course", cascade="all, delete-orphan")
-    learner: Mapped["Learner"] = relationship(back_populates="course")
+    learner: Mapped["Learner"] = relationship(back_populates="courses")
+
+
+class AIArtifactCache(Base):
+    __tablename__ = "ai_artifact_cache"
+    __table_args__ = (UniqueConstraint("learner_id", "operation", "cache_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id"), index=True)
+    operation: Mapped[str] = mapped_column(String(80))
+    cache_key: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
 
 class Learner(Base):
@@ -83,7 +102,7 @@ class Learner(Base):
         back_populates="learner", cascade="all, delete-orphan"
     )
     user: Mapped[User | None] = relationship(back_populates="learner")
-    course: Mapped[GeneratedCourse | None] = relationship(back_populates="learner")
+    courses: Mapped[list[GeneratedCourse]] = relationship(back_populates="learner")
 
 
 class LearningGoal(Base):
@@ -107,6 +126,8 @@ class Topic(Base):
     description: Mapped[str] = mapped_column(Text)
     difficulty: Mapped[str] = mapped_column(String(30))
     concept_tags: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    learning_objectives_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    estimated_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     goal_relevance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     content_source: Mapped[str] = mapped_column(String(240))
     track_id: Mapped[str] = mapped_column(String(50), default="generative_ai")
@@ -172,6 +193,7 @@ class LearningPath(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id"), index=True)
+    course_id: Mapped[int | None] = mapped_column(ForeignKey("generated_courses.id"), nullable=True, index=True)
     goal: Mapped[str] = mapped_column(Text)
     path_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     overall_rationale: Mapped[str] = mapped_column(Text, default="")

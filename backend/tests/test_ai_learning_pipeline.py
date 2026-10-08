@@ -9,10 +9,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import Base
-from app.models import Assessment, Learner, SkillScore, Topic, Weakness
+from app.models import AIArtifactCache, Assessment, Learner, SkillScore, Topic, Weakness
+from app.schemas import LearningContent
 from app.seed_topics import seed_topics
 from app.services import ai_provider
 from app.services.curriculum_service import generate_curriculum
+from app.services.content_service import generate_learning_content
 from app.services.learning_ai_service import generate_remediation_aid, interpret_skill_results
 from app.services.tutor_service import answer_tutor_question
 
@@ -23,13 +25,18 @@ class FakeOpenRouter:
 
     def __init__(self, **kwargs):
         FakeOpenRouter.client_options = kwargs
-        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                with_raw_response=SimpleNamespace(create=self.create_raw)
+            )
+        )
 
-    def create(self, **kwargs):
+    def create_raw(self, **kwargs):
         FakeOpenRouter.request = kwargs
-        return SimpleNamespace(
+        response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=FakeOpenRouter.content))]
         )
+        return SimpleNamespace(status_code=200, parse=lambda: response)
 
 
 @pytest.fixture
@@ -94,6 +101,11 @@ def curriculum_response(goal: str) -> str:
             "goal": goal,
             "level": "intermediate",
             "estimated_duration": "180 minutes",
+            "learning_objectives": [
+                "Explain vector search",
+                "Build a grounded response workflow",
+                "Evaluate retrieval quality",
+            ],
             "topics": [
                 {
                     "title": "Embeddings",
@@ -224,8 +236,12 @@ def test_invalid_interpretation_and_remediation_use_labeled_fallbacks(learning_c
 
     FakeOpenRouter.content = json.dumps(
         {
+            "weak_concepts": ["embeddings"],
             "explanation": "Revisit embeddings by comparing the representation of related texts.",
+            "alternative_explanation": "Embeddings are number lists that help compare the meanings of texts.",
+            "example": "Compare a refund request with a refund policy embedding.",
             "practice_suggestion": "Compare two short strings and explain which should be closer.",
+            "next_action": "Compare a pair of text vectors and retry the assessment.",
         }
     )
     aid, remediation_source = generate_remediation_aid(
@@ -237,6 +253,144 @@ def test_invalid_interpretation_and_remediation_use_labeled_fallbacks(learning_c
     )
     assert remediation_source == "openrouter"
     assert "Compare two short strings" in aid.practice_suggestion
+
+
+def test_interpretation_rejects_unexpected_fields(learning_context):
+    _, learner = learning_context
+    FakeOpenRouter.content = json.dumps(
+        {
+            "summary": "Your score is developing; strengthen embeddings before building retrieval workflows.",
+            "focus_concepts": ["embeddings"],
+            "fabricated_field": "not in the schema",
+        }
+    )
+
+    _, source = interpret_skill_results(learner, 62, ["embeddings"], [], [])
+
+    assert source == "deterministic_fallback"
+
+
+def test_remediation_rejects_missing_structured_fields(learning_context):
+    database, learner = learning_context
+    FakeOpenRouter.content = json.dumps(
+        {
+            "weak_concepts": ["embeddings"],
+            "explanation": "Revisit embeddings by comparing representations of related text.",
+            "practice_suggestion": "Compare two short strings and explain which should be closer.",
+        }
+    )
+
+    aid, source = generate_remediation_aid(
+        learner,
+        database.get(Topic, "retrieval-augmented-generation"),
+        ["embeddings"],
+        42,
+        "Revisit weak concepts.",
+    )
+
+    assert source == "deterministic_fallback"
+    assert aid.weak_concepts == ["embeddings"]
+    assert aid.alternative_explanation
+    assert aid.example
+    assert aid.next_action
+
+
+def test_learning_content_accepts_valid_openrouter_response(learning_context):
+    database, learner = learning_context
+    topic = database.get(Topic, "ai-foundations")
+    FakeOpenRouter.content = json.dumps(
+        {
+            "topic_id": topic.id,
+            "topic_title": topic.title,
+            "overview": "Generative AI learns patterns and uses them to create new outputs.",
+            "learning_objectives": ["Explain generation", "Identify application constraints"],
+            "explanation": "A language model predicts useful continuations from patterns learned during training. "
+            "Applications add prompts, constraints, trusted context, and validation around that model.",
+            "key_concepts": ["generative models", "application constraints"],
+            "examples": ["Draft a response using approved support material."],
+            "real_world_example": "A support assistant drafts an answer grounded in approved policy text.",
+            "practical_example": "Combine a user question with a trusted passage before drafting a response.",
+            "common_mistakes": ["Treating fluent output as verified truth."],
+            "quick_recap": ["Models generate from learned patterns.", "Applications must validate output."],
+            "analogy": "A model is a drafting partner while the application remains the editor.",
+            "code_example": "print('grounded generation')",
+            "coding_example": {
+                "title": "Draft a constrained response",
+                "code": "context = 'Approved policy'\nquestion = 'Can I return this?'\nprint(context, question)",
+                "explanation": "The code keeps the trusted context beside the user question.",
+                "expected_output": "Approved policy Can I return this?",
+                "why_it_matters": "A grounded prompt gives the model evidence to use.",
+                "common_mistake": "Using untrusted context as if it were verified.",
+            },
+            "prerequisites": [],
+            "practice_suggestion": "Explain one generated response and identify its evidence.",
+            "important_notes": ["Validate model output before using it."],
+        }
+    )
+
+    content, source = generate_learning_content(topic, learner, database)
+
+    assert source == "openrouter"
+    assert content.topic_id == topic.id
+    assert content.real_world_example
+    assert content.practice_suggestion
+
+
+def test_learning_content_invalid_response_uses_curated_fallback(learning_context):
+    database, learner = learning_context
+    topic = database.get(Topic, "ai-foundations")
+    FakeOpenRouter.content = json.dumps(
+        {
+            "topic_id": topic.id,
+            "topic_title": topic.title,
+            "overview": "This output omits required learning fields.",
+            "unsupported": True,
+        }
+    )
+
+    content, source = generate_learning_content(topic, learner, database)
+
+    assert source == "curated_fallback"
+    assert content.topic_id == topic.id
+    assert content.learning_objectives
+
+
+def test_learning_content_is_persistently_cached_and_reused(learning_context, monkeypatch):
+    database, learner = learning_context
+    topic = database.get(Topic, "ai-foundations")
+    calls = []
+
+    def generate_once(*args, **kwargs):
+        calls.append(1)
+        return LearningContent(
+            topic_id=topic.id,
+            topic_title=topic.title,
+            overview="Learn how generative models create outputs from learned patterns.",
+            learning_objectives=["Explain model generation", "Apply validation to an output"],
+            explanation=(
+                "Generative models learn patterns from data and use those patterns to create new outputs. "
+                "Applications add context and validation around the model."
+            ),
+            key_concepts=["generative models", "validation"],
+            examples=["Draft a response using approved support information."],
+            real_world_example="A support assistant uses approved policy text to draft an answer.",
+            practical_example="Combine an approved passage with a user question and review the generated result.",
+            common_mistakes=["Treating fluent output as verified truth."],
+            quick_recap=["Models generate from learned patterns.", "Applications still validate output."],
+            prerequisites=[],
+            practice_suggestion="Explain a generated answer and identify its evidence.",
+        )
+
+    monkeypatch.setattr("app.services.content_service._openrouter_content", generate_once)
+
+    first, first_source = generate_learning_content(topic, learner, database)
+    second, second_source = generate_learning_content(topic, learner, database)
+
+    assert first_source == "openrouter"
+    assert second_source == "cache"
+    assert first == second
+    assert calls == [1]
+    assert database.query(AIArtifactCache).filter_by(operation="learning_content").count() == 1
 
 
 def test_tutor_fallback_answers_topic_question_and_rejects_unknown_modules(

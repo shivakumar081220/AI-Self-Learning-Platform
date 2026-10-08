@@ -13,6 +13,7 @@ from ..schemas import (
     QuestionReviewItem,
     RecommendationResponse,
 )
+from ..topic_titles import display_topic_title
 from .learning_ai_service import generate_remediation_aid
 from .path_engine import generate_path_plan
 
@@ -133,16 +134,20 @@ def _adapt_path(
     database: Session,
     learner: Learner,
     topic_id: str,
+    course_id: int | None,
     action_type: str,
 ) -> tuple[str | None, str | None]:
     path = database.scalar(
         select(LearningPath)
-        .where(LearningPath.learner_id == learner.id)
+        .where(
+            LearningPath.learner_id == learner.id,
+            LearningPath.course_id == course_id,
+        )
         .order_by(LearningPath.created_at.desc())
     )
     if not path:
         return None, None
-    plan = generate_path_plan(database, learner)
+    plan = generate_path_plan(database, learner, course_id)
     topics = plan["topics"]
     current_id = None
     if action_type in {"remediate", "practice", "reassess"}:
@@ -194,7 +199,7 @@ def _recommendation(
         action_type="continue",
         target_topic_id=target_topic_id,
         target_topic_title=target_topic_title,
-        summary=f"You demonstrated strong understanding of {topic.title}.",
+        summary=f"You demonstrated strong understanding of {display_topic_title(topic.title)}.",
         next_action="Continue to the next recommended topic in your adaptive path.",
         remediation=None,
     )
@@ -284,7 +289,9 @@ def apply_assessment_result(
         topic_progress.status = "completed"
     database.add(topic_progress)
 
-    target_topic_id, target_topic_title = _adapt_path(database, learner, topic.id, action_type)
+    target_topic_id, target_topic_title = _adapt_path(
+        database, learner, topic.id, topic.course_id, action_type
+    )
     recommendation = _recommendation(
         action_type, topic, weak_concepts, target_topic_id, target_topic_title
     )
@@ -299,6 +306,9 @@ def apply_assessment_result(
         recommendation.remediation = remediation_aid.explanation
         recommendation.practice_suggestion = remediation_aid.practice_suggestion
         recommendation.remediation_source = remediation_source
+        recommendation.alternative_explanation = remediation_aid.alternative_explanation
+        recommendation.example = remediation_aid.example
+        recommendation.remediation_next_action = remediation_aid.next_action
         assessment.feedback_json = {
             **(assessment.feedback_json or {}),
             "remediation": {
@@ -318,8 +328,9 @@ def apply_assessment_result(
     return AssessmentResultResponse(
         assessment_id=assessment.id,
         learner_id=learner.id,
+        course_id=topic.course_id,
         topic_id=topic.id,
-        topic_title=topic.title,
+        topic_title=display_topic_title(topic.title),
         score=correct_count,
         percentage=percentage,
         correct_count=correct_count,

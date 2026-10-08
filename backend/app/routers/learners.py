@@ -18,6 +18,7 @@ from ..schemas import (
     TutorRequest,
     TutorResponse,
 )
+from ..topic_titles import display_topic_title
 from ..models import User
 from ..security import ensure_learner_access, get_optional_user, require_user
 from ..services.tutor_service import answer_tutor_question, module_matches_question
@@ -89,6 +90,18 @@ def _replace_active_goal(learner: Learner, goal_text: str, track_id: str) -> Non
     for goal in learner.goals:
         goal.is_active = False
     learner.goals.append(LearningGoal(title=goal_text, track=track_id, is_active=True))
+
+
+def _current_course(database: Session, learner: Learner) -> GeneratedCourse | None:
+    return database.scalar(
+        select(GeneratedCourse).where(
+            GeneratedCourse.learner_id == learner.id,
+            GeneratedCourse.track_id == learner.track,
+            GeneratedCourse.goal == learner.goal_text,
+            GeneratedCourse.level == learner.experience_level,
+            GeneratedCourse.target_outcome == learner.target_outcome,
+        )
+    )
 
 
 @router.get("/goals", response_model=list[GoalOption])
@@ -210,16 +223,21 @@ def ask_learner_tutor(
         raise HTTPException(status_code=404, detail="Learner not found")
     ensure_learner_access(learner, user)
 
+    topic = database.get(Topic, payload.topic_id) if payload.topic_id else None
+    course = _current_course(database, learner)
+    course_id = topic.course_id if topic else course.id if course else None
     path = database.scalar(
         select(LearningPath)
-        .where(LearningPath.learner_id == learner_id)
+        .where(
+            LearningPath.learner_id == learner_id,
+            LearningPath.course_id == course_id,
+        )
         .order_by(LearningPath.created_at.desc())
     )
     if payload.topic_id:
         path_topic_ids = {item.get("topic_id") for item in path.path_json} if path else set()
         if payload.topic_id not in path_topic_ids:
             raise HTTPException(status_code=404, detail="Tutor topic is not part of the learner's path")
-        topic = database.get(Topic, payload.topic_id)
         if not topic or (topic.owner_user_id is not None and topic.owner_user_id != learner.user_id):
             raise HTTPException(status_code=404, detail="Tutor topic is not part of the learner's path")
     else:
@@ -229,10 +247,9 @@ def ask_learner_tutor(
             else None
         )
         topic = database.get(Topic, current_topic_id) if current_topic_id else None
-    course = database.scalar(
-        select(GeneratedCourse).where(GeneratedCourse.learner_id == learner_id)
-    )
+    course = database.get(GeneratedCourse, course_id) if course_id else None
     course_topics = [item.get("title", "") for item in path.path_json] if path else []
+    path_topic_ids = {item.get("topic_id") for item in path.path_json} if path else set()
     completed_topics = [
         topic.title
         for progress in database.scalars(
@@ -241,15 +258,21 @@ def ask_learner_tutor(
                 TopicProgress.status == "completed",
             )
         ).all()
-        if (topic := database.get(Topic, progress.topic_id)) is not None
+        if progress.topic_id in path_topic_ids
+        and (topic := database.get(Topic, progress.topic_id)) is not None
     ]
+    recent_assessment_query = select(Assessment).where(
+        Assessment.learner_id == learner_id,
+        Assessment.completed_at.is_not(None),
+    )
+    if path:
+        recent_assessment_query = recent_assessment_query.where(
+            Assessment.topic_id.in_(path_topic_ids)
+        )
     recent_assessments = [
         {"topic_id": item.topic_id, "score": item.score}
         for item in database.scalars(
-            select(Assessment)
-            .where(Assessment.learner_id == learner_id, Assessment.completed_at.is_not(None))
-            .order_by(Assessment.completed_at.desc())
-            .limit(5)
+            recent_assessment_query.order_by(Assessment.completed_at.desc()).limit(5)
         ).all()
     ]
     question_lower = payload.question.lower()
@@ -278,7 +301,7 @@ def ask_learner_tutor(
     return TutorResponse(
         learner_id=learner_id,
         topic_id=topic.id if topic else payload.topic_id,
-        topic_title=topic.title if topic else "Current learning topic",
+        topic_title=display_topic_title(topic.title) if topic else "Current learning topic",
         answer=tutor_answer.answer,
         simple_explanation=tutor_answer.simple_explanation,
         example=tutor_answer.example,
@@ -292,13 +315,13 @@ def ask_learner_tutor(
         course_connection=(
             f"No matching module was found in {course.title if course else 'your current learning path'}; no module was invented."
             if not module_available
-            else f"{topic.title} is part of {course.title} and supports your goal: {learner.goal_text}."
+            else f"{display_topic_title(topic.title)} is part of {course.title} and supports your goal: {learner.goal_text}."
             if topic and course
-            else f"This explanation is scoped to {topic.title}."
+            else f"This explanation is scoped to {display_topic_title(topic.title)}."
             if topic
             else "No course module is currently selected."
         ),
-        module_title=topic.title if topic and module_available else None,
+        module_title=display_topic_title(topic.title) if topic and module_available else None,
         source=source,
     )
 
@@ -315,23 +338,39 @@ def get_learner_summary(
         learner_id,
         database.scalars(select(SkillScore).where(SkillScore.learner_id == learner_id)).all(),
     )
+    course = _current_course(database, learner)
+    path_query = select(LearningPath).where(LearningPath.learner_id == learner_id)
+    if course:
+        path_query = path_query.where(LearningPath.course_id == course.id)
     path = database.scalar(
-        select(LearningPath)
-        .where(LearningPath.learner_id == learner_id)
-        .order_by(LearningPath.created_at.desc())
+        path_query.order_by(LearningPath.created_at.desc())
     )
+    path_topic_ids = {
+        item.get("topic_id") for item in path.path_json if item.get("topic_id")
+    } if path else set()
     progress = database.scalars(
         select(TopicProgress).where(TopicProgress.learner_id == learner_id)
     ).all()
+    if path:
+        progress = [item for item in progress if item.topic_id in path_topic_ids]
     current_item = path.path_json[path.current_index] if path and path.current_index < len(path.path_json) else None
+    current_topic = (
+        database.get(Topic, current_item["topic_id"]) if current_item else None
+    )
     completed_count = sum(
         1 for item in progress if item.status == "completed" or item.mastery_score >= 0.8
     )
     total_topics = len(path.path_json) if path else 0
+    latest_assessment_query = select(Assessment).where(
+        Assessment.learner_id == learner_id,
+        Assessment.completed_at.is_not(None),
+    )
+    if path:
+        latest_assessment_query = latest_assessment_query.where(
+            Assessment.topic_id.in_(path_topic_ids)
+        )
     latest_assessment = database.scalar(
-        select(Assessment)
-        .where(Assessment.learner_id == learner_id, Assessment.completed_at.is_not(None))
-        .order_by(Assessment.completed_at.desc())
+        latest_assessment_query.order_by(Assessment.completed_at.desc())
     )
     latest_summary = None
     if latest_assessment and latest_assessment.score is not None:
@@ -339,10 +378,9 @@ def get_learner_summary(
         if topic or latest_assessment.assessment_type == "diagnostic":
             latest_summary = LatestAssessmentSummary(
                 topic_id=topic.id if topic else None,
-                topic_title=topic.title if topic else "Diagnostic assessment",
+                topic_title=display_topic_title(topic.title) if topic else "Diagnostic assessment",
                 percentage=round(latest_assessment.score * 100, 1),
             )
-    path_topic_ids = [item.get("topic_id") for item in path.path_json if item.get("topic_id")] if path else []
     recommendation_record = (
         database.scalar(
             select(Recommendation)
@@ -361,7 +399,7 @@ def get_learner_summary(
         recommendation = RecommendationResponse(
             action_type=recommendation_record.action_type,
             target_topic_id=recommendation_record.topic_id,
-            target_topic_title=target.title if target else None,
+            target_topic_title=display_topic_title(target.title) if target else None,
             summary=recommendation_record.reason,
             next_action=(
                 "Review weak concepts and reassess before continuing."
@@ -377,7 +415,7 @@ def get_learner_summary(
         name=learner.name,
         goal=learner.goal_text,
         current_topic_id=current_item.get("topic_id") if current_item else None,
-        current_topic_title=current_item.get("title") if current_item else None,
+        current_topic_title=display_topic_title(current_topic.title) if current_topic else None,
         completed_topics=completed_count,
         total_topics=total_topics,
         progress_percentage=round((completed_count / total_topics) * 100) if total_topics else 0,

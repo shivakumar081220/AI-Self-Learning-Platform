@@ -1,11 +1,14 @@
 from collections import defaultdict
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..goal_catalog import GOAL_BY_KEY
-from ..models import Assessment, Learner, LearningPath, SkillScore, Topic, TopicPrerequisite, TopicProgress
+from ..models import Assessment, GeneratedCourse, Learner, LearningPath, SkillScore, Topic, TopicPrerequisite, TopicProgress
+from ..schemas import SkillInterpretationResponse
+from ..topic_titles import display_topic_title
 from ..track_catalog import TRACK_BY_ID
 
 
@@ -91,6 +94,29 @@ def _assessment_scores(assessments: list[Assessment]) -> dict[str, float]:
     return recent_scores
 
 
+def _ai_focus_concepts(
+    assessments: list[Assessment], available_concepts: set[str]
+) -> set[str]:
+    diagnostic_assessments = [
+        assessment
+        for assessment in assessments
+        if assessment.assessment_type == "diagnostic" and assessment.completed_at
+    ]
+    if not diagnostic_assessments:
+        return set()
+    latest = max(diagnostic_assessments, key=lambda item: item.completed_at)
+    raw_interpretation = (latest.feedback_json or {}).get("ai_interpretation")
+    if not isinstance(raw_interpretation, dict):
+        return set()
+    try:
+        interpretation = SkillInterpretationResponse.model_validate(raw_interpretation)
+    except ValidationError:
+        return set()
+    if interpretation.source != "openrouter":
+        return set()
+    return set(interpretation.focus_concepts).intersection(available_concepts)
+
+
 def _required_topics(
     topic_id: str,
     prerequisites: dict[str, list[str]],
@@ -110,10 +136,12 @@ def _required_topics(
 def _topic_priority(
     topic: Topic,
     learner: Learner,
+    experience_level: str,
     goal_key: str,
     skills: dict[str, SkillScore],
     recent_scores: dict[str, float],
     downstream_pressure: dict[str, int],
+    ai_focus_concepts: set[str],
 ) -> tuple[float, ...]:
     metrics = _topic_scores(skills, topic)
     goal_relevance = _topic_relevance(topic, goal_key)
@@ -125,12 +153,14 @@ def _topic_priority(
         "beginner": {"beginner": 1.0, "intermediate": 0.2, "advanced": 0.0},
         "intermediate": {"beginner": 0.3, "intermediate": 1.0, "advanced": 0.6},
         "advanced": {"beginner": 0.0, "intermediate": 0.7, "advanced": 1.0},
-    }[learner.experience_level][topic.difficulty]
+    }[experience_level][topic.difficulty]
     weak_priority = len(metrics["weak_concepts"]) * 5.0
+    ai_focus_priority = len(set(topic.concept_tags).intersection(ai_focus_concepts))
     developing_priority = len(metrics["developing_concepts"]) * 1.5
     pressure = downstream_pressure.get(topic.id, 0) * 0.25
     return (
         weak_priority + recent_pressure,
+        float(ai_focus_priority),
         goal_relevance,
         pressure + experience_fit,
         developing_priority,
@@ -144,6 +174,7 @@ def _topic_reason(
     skills: dict[str, SkillScore],
     recent_scores: dict[str, float],
     mastered: set[str],
+    ai_focus_concepts: set[str],
 ) -> str:
     metrics = _topic_scores(skills, topic)
     track_name = TRACK_BY_ID.get(goal_key).name if goal_key in TRACK_BY_ID else "Generative AI"
@@ -152,6 +183,13 @@ def _topic_reason(
         reasons.append(
             "It targets weak concepts: "
             + ", ".join(concept.replace("_", " ") for concept in metrics["weak_concepts"])
+            + "."
+        )
+    focused_concepts = sorted(set(topic.concept_tags).intersection(ai_focus_concepts))
+    if focused_concepts:
+        reasons.append(
+            "Your AI diagnostic analysis recommends focusing on: "
+            + ", ".join(concept.replace("_", " ") for concept in focused_concepts)
             + "."
         )
     if topic.id in recent_scores and recent_scores[topic.id] < FOCUSED_PRACTICE_THRESHOLD:
@@ -168,8 +206,27 @@ def _topic_reason(
     return " ".join(reasons)
 
 
-def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
-    if learner.user_id is not None:
+def generate_path_plan(
+    database: Session, learner: Learner, course_id: int | None = None
+) -> dict[str, Any]:
+    course = database.get(GeneratedCourse, course_id) if course_id is not None else None
+    if course_id is not None and (not course or course.learner_id != learner.id):
+        raise ValueError("Course does not belong to this learner")
+    if course:
+        topics = database.scalars(
+            select(Topic).where(
+                Topic.course_id == course.id,
+                Topic.is_active.is_(True),
+            )
+        ).all()
+        topic_ids = {topic.id for topic in topics}
+        relationships = database.scalars(
+            select(TopicPrerequisite).where(
+                TopicPrerequisite.topic_id.in_(topic_ids),
+                TopicPrerequisite.prerequisite_id.in_(topic_ids),
+            )
+        ).all()
+    elif learner.user_id is not None:
         topics = database.scalars(
             select(Topic).where(
                 Topic.owner_user_id == learner.user_id,
@@ -207,8 +264,12 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
         select(Assessment).where(Assessment.learner_id == learner.id)
     ).all()
     recent_scores = _assessment_scores(assessments)
+    available_concepts = {concept for topic in topics for concept in topic.concept_tags}
+    ai_focus_concepts = _ai_focus_concepts(assessments, available_concepts)
     mastered = _mastered_topic_ids(topics, progress, skills)
-    goal_key = _learner_track_key(learner)
+    goal_key = course.track_id if course else _learner_track_key(learner)
+    experience_level = course.level if course else learner.experience_level
+    goal_text = course.goal if course else learner.goal_text
 
     completed_progress_ids = {
         topic_id for topic_id, record in progress.items() if record.status == "completed"
@@ -242,10 +303,12 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
             key=lambda topic_id: _topic_priority(
                 topic_by_id[topic_id],
                 learner,
+                experience_level,
                 goal_key,
                 skills,
                 recent_scores,
                 downstream_pressure,
+                ai_focus_concepts,
             ),
         )
         ordered_ids.append(selected_id)
@@ -257,7 +320,7 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
             topics_json.append(
                 {
                     "topic_id": topic.id,
-                    "title": topic.title,
+                    "title": display_topic_title(topic.title),
                     "difficulty": topic.difficulty,
                     "status": "completed",
                     "prerequisites": prerequisites.get(topic.id, []),
@@ -272,22 +335,35 @@ def generate_path_plan(database: Session, learner: Learner) -> dict[str, Any]:
         topics_json.append(
             {
                 "topic_id": topic.id,
-                "title": topic.title,
+                "title": display_topic_title(topic.title),
                 "difficulty": topic.difficulty,
                 "status": "remediation" if progress_record and progress_record.status == "remediation" else "pending",
                 "prerequisites": prerequisites.get(topic.id, []),
-                "reason": _topic_reason(topic, goal_key, skills, recent_scores, mastered),
+                "reason": _topic_reason(
+                    topic,
+                    goal_key,
+                    skills,
+                    recent_scores,
+                    mastered,
+                    ai_focus_concepts,
+                ),
                 "relevance_score": relevance,
             }
         )
 
     return {
-        "goal": learner.goal_text,
+        "goal": goal_text,
+        "course_id": course.id if course else None,
         "topics": topics_json,
         "overall_rationale": (
             f"This {TRACK_BY_ID.get(goal_key).name if goal_key in TRACK_BY_ID else 'Generative AI'} path is ordered for your "
-            f"{learner.experience_level} experience level and selected goal. It places unmet prerequisites before dependent topics, prioritizes "
+            f"{experience_level} experience level and selected goal. It places unmet prerequisites before dependent topics, prioritizes "
             "weak concepts and recent assessment gaps, and skips mastered topics."
+            + (
+                " It also applies focus from your validated OpenRouter diagnostic analysis."
+                if ai_focus_concepts
+                else ""
+            )
         ),
     }
 
@@ -303,11 +379,18 @@ def validate_path_payload(path_payload: dict[str, Any], topic_by_id: dict[str, T
 
 def path_response(path: LearningPath, topic_by_id: dict[str, Topic]) -> dict[str, Any]:
     validate_path_payload({"topics": path.path_json}, topic_by_id)
-    topic_items = path.path_json
+    topic_items = [
+        {
+            **item,
+            "title": display_topic_title(topic_by_id[item["topic_id"]].title),
+        }
+        for item in path.path_json
+    ]
     current_item = topic_items[path.current_index] if path.current_index < len(topic_items) else None
     return {
         "path_id": path.id,
         "learner_id": path.learner_id,
+        "course_id": path.course_id,
         "goal": path.goal,
         "current_index": path.current_index,
         "current_topic_id": current_item["topic_id"] if current_item else None,

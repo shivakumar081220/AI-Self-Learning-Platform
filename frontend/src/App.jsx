@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useAuth } from "./auth";
 
 import {
@@ -34,6 +34,22 @@ const steps = [
   "Assessment",
   "Adapt",
 ];
+
+function WaitMessage({ children }) {
+  const [takingLonger, setTakingLonger] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setTakingLonger(true), 12000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  return (
+    <>
+      <p>{children}</p>
+      {takingLonger && <p role="status">AI generation is taking longer than expected. Your progress is safe.</p>}
+    </>
+  );
+}
 
 function HomePage() {
   return (
@@ -115,7 +131,7 @@ function CourseLibrary({ curriculum, learnerId }) {
       <div className="course-library-grid">
         {courses.map((course) => (
           <button className={`${course.is_current ? "course-library-card current" : "course-library-card"}${String(course.course_id) === String(selectedCourse.course_id) ? " selected" : ""}`} key={String(course.course_id)} onClick={() => setSelectedCourseId(String(course.course_id))} type="button">
-            <div className="course-library-card-top"><span>{course.is_current ? "Current course" : "Previous course"}</span><strong>{course.track_name}</strong></div>
+            <div className="course-library-card-top"><span>{course.is_current ? "Current course" : "Enrolled course"}</span><strong>{course.track_name}</strong></div>
             <h3>{course.course_title}</h3>
             <p>{course.description}</p>
             <div className="course-library-meta"><span>{course.topics?.length || 0} topics</span><span>{course.level}</span><span>{course.generation_source === "openrouter" ? "AI-generated" : "Fallback-generated"}</span></div>
@@ -127,7 +143,9 @@ function CourseLibrary({ curriculum, learnerId }) {
       <article className="course-detail-panel">
         <div><p className="eyebrow">Selected course details</p><h3>{selectedCourse.course_title}</h3><p>{selectedCourse.description}</p><p><strong>Goal:</strong> {selectedCourse.goal}</p></div>
         <div className="course-detail-topics"><p className="eyebrow">Course topics</p><ul>{(selectedCourse.topics || []).map((topic) => <li key={topic.topic_id || topic.title}><strong>{topic.title}</strong><span>{topic.description}</span></li>)}</ul></div>
-        {selectedCourse.is_current && <Link className="primary-button" to={`/learning-path/${learnerId}`}>Continue current course</Link>}
+        <Link className="primary-button" to={`/learning-path/${learnerId}?course_id=${encodeURIComponent(selectedCourse.course_id)}`}>
+          Open learning path
+        </Link>
       </article>
     </section>
   );
@@ -170,12 +188,11 @@ function DashboardPageV2() {
       <header className="dashboard-header">
         <Link className="brand-link" to="/dashboard">Adaptive AI</Link>
         <button className="menu-toggle" aria-expanded={isMenuOpen} aria-controls="dashboard-navigation-v2" aria-label={isMenuOpen ? "Close navigation" : "Open navigation"} onClick={() => setIsMenuOpen((open) => !open)} type="button"><span /><span /><span /></button>
-        <nav id="dashboard-navigation-v2" className={isMenuOpen ? "is-open" : ""} onClick={() => setIsMenuOpen(false)}><Link to={`/learning-path/${learner.id}`}>My learning</Link><Link to="/profile">Profile</Link><button className="text-button" onClick={signOut} type="button">Log out</button></nav>
+        <nav id="dashboard-navigation-v2" className={isMenuOpen ? "is-open" : ""} onClick={() => setIsMenuOpen(false)}><button className="text-button" onClick={signOut} type="button">Log out</button></nav>
       </header>
       <main className="dashboard-shell">
         <p className="eyebrow">Your learning space</p>
         <h1>Welcome, {learner.name}.</h1>
-        {curriculum && <section className="course-banner"><div><p className="eyebrow">Current course</p><h2>{curriculum.course_title}</h2><p>{curriculum.description}</p></div><span>{curriculum.topics.length} topics · {curriculum.generation_source === "openrouter" ? "AI-generated" : "Fallback-generated"}</span></section>}
         <CourseLibrary curriculum={curriculum} learnerId={learner.id} />
         <section className="dashboard-grid"><div><p className="eyebrow">Progress</p><strong className="dashboard-number">{summary?.progress_percentage || 0}%</strong><p>{summary?.completed_topics || 0} of {summary?.total_topics || 0} topics complete</p></div><div><p className="eyebrow">Current topic</p><strong>{summary?.current_topic_title || "Ready to begin"}</strong><p>{summary?.recommendation?.summary || "Your next recommendation will appear here."}</p></div><div><p className="eyebrow">Skill readiness</p><strong className="dashboard-number">{summary?.overall_skill_percentage || 0}%</strong><p>across recorded concepts</p></div></section>
         <section className="profile-snapshot"><div><p className="eyebrow">Learner profile</p><strong>{learner.experience_level} · {learner.track.replaceAll("_", " ")}</strong><p>{learner.goal_text}</p>{learner.target_outcome && <p>{learner.target_outcome}</p>}</div><div><p className="eyebrow">Latest assessment</p><strong>{summary?.latest_assessment ? `${summary.latest_assessment.percentage}% · ${summary.latest_assessment.topic_title}` : "No assessment yet"}</strong><p>{summary?.latest_assessment ? "Your latest result is included in your learning state." : "Complete the diagnostic to establish your starting point."}</p></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary?.weak_concepts?.length ? summary.weak_concepts.slice(0, 3).map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open skill gaps</em>}</div></div><div><p className="eyebrow">Recommended next step</p><strong>{summary?.recommendation?.target_topic_title || "Start your learning path"}</strong><p>{summary?.recommendation?.next_action || "Your personalized path will guide the next activity."}</p></div></section>
@@ -197,7 +214,7 @@ function DashboardPage() {
         function signOut() { logout(); navigate("/", { replace: true }); }
         if (error) return <div className="app-shell"><main className="center-state"><p className="eyebrow">Your learning space</p><h1>Choose your first course.</h1><p className="hero-copy">Set your experience, choose an AI learning track, and the platform will generate your diagnostic and personalized path.</p><ErrorMessage message={error} /><Link className="primary-button" to="/profile">Choose a course</Link></main></div>;
         if (!learner) return <main className="center-state"><span className="loading-mark">● ● ●</span><p>Loading your learning space...</p></main>;
-    return <div className="app-shell"><header className="dashboard-header"><Link className="brand-link" to="/dashboard">Adaptive AI</Link><button className="menu-toggle" aria-expanded={isMenuOpen} aria-controls="dashboard-navigation" aria-label={isMenuOpen ? "Close navigation" : "Open navigation"} onClick={() => setIsMenuOpen((open) => !open)} type="button"><span /><span /><span /></button><nav id="dashboard-navigation" className={isMenuOpen ? "is-open" : ""} onClick={() => setIsMenuOpen(false)}><Link to="/dashboard">Dashboard</Link><Link to={`/learning-path/${learner.id}`}>My learning</Link><Link to="/profile">Profile</Link><button className="text-button" onClick={signOut} type="button">Log out</button></nav></header><main className="dashboard-shell"><p className="eyebrow">Your learning space</p><h1>Welcome, {learner.name}.</h1>{curriculum && <section className="course-banner"><div><p className="eyebrow">Current course</p><h2>{curriculum.course_title}</h2><p>{curriculum.description}</p></div><span>{curriculum.topics.length} topics · {curriculum.generation_source === "openrouter" ? "AI-generated" : curriculum.generation_source === "deterministic_fallback" ? "Fallback-generated" : "Source unrecorded"}</span></section>}<section className="dashboard-grid"><div><p className="eyebrow">Progress</p><strong className="dashboard-number">{summary?.progress_percentage || 0}%</strong><p>{summary?.completed_topics || 0} of {summary?.total_topics || 0} topics complete</p></div><div><p className="eyebrow">Current topic</p><strong>{summary?.current_topic_title || "Ready to begin"}</strong><p>{summary?.recommendation?.summary || "Your next recommendation will appear here."}</p></div><div><p className="eyebrow">Skill readiness</p><strong className="dashboard-number">{summary?.overall_skill_percentage || 0}%</strong><p>across recorded concepts</p></div></section><section className="profile-snapshot"><div><p className="eyebrow">Learner profile</p><strong>{learner.experience_level} · {learner.track.replaceAll("_", " ")}</strong><p>{learner.goal_text}</p>{learner.target_outcome && <p>{learner.target_outcome}</p>}</div><div><p className="eyebrow">Latest assessment</p><strong>{summary?.latest_assessment ? `${summary.latest_assessment.percentage}% · ${summary.latest_assessment.topic_title}` : "No assessment yet"}</strong><p>{summary?.latest_assessment ? "Your latest result is included in your learning state." : "Complete the diagnostic to establish your starting point."}</p></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary?.weak_concepts?.length ? summary.weak_concepts.slice(0, 3).map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open skill gaps</em>}</div></div><div><p className="eyebrow">Recommended next step</p><strong>{summary?.recommendation?.target_topic_title || "Start your learning path"}</strong><p>{summary?.recommendation?.next_action || "Your personalized path will guide the next activity."}</p></div></section><div className="dashboard-actions"><Link className="primary-button" to={`/learning-path/${learner.id}`}>{summary?.current_topic_id ? "Continue learning" : "Open my learning"}</Link><button className="secondary-button" onClick={signOut} type="button">Log out</button></div></main></div>;
+    return <div className="app-shell"><header className="dashboard-header"><Link className="brand-link" to="/dashboard">Adaptive AI</Link><button className="menu-toggle" aria-expanded={isMenuOpen} aria-controls="dashboard-navigation" aria-label={isMenuOpen ? "Close navigation" : "Open navigation"} onClick={() => setIsMenuOpen((open) => !open)} type="button"><span /><span /><span /></button><nav id="dashboard-navigation" className={isMenuOpen ? "is-open" : ""} onClick={() => setIsMenuOpen(false)}><Link to="/dashboard">Dashboard</Link><button className="text-button" onClick={signOut} type="button">Log out</button></nav></header><main className="dashboard-shell"><p className="eyebrow">Your learning space</p><h1>Welcome, {learner.name}.</h1>{curriculum && <section className="course-banner"><div><p className="eyebrow">Current course</p><h2>{curriculum.course_title}</h2><p>{curriculum.description}</p></div><span>{curriculum.topics.length} topics · {curriculum.generation_source === "openrouter" ? "AI-generated" : curriculum.generation_source === "deterministic_fallback" ? "Fallback-generated" : "Source unrecorded"}</span></section>}<section className="dashboard-grid"><div><p className="eyebrow">Progress</p><strong className="dashboard-number">{summary?.progress_percentage || 0}%</strong><p>{summary?.completed_topics || 0} of {summary?.total_topics || 0} topics complete</p></div><div><p className="eyebrow">Current topic</p><strong>{summary?.current_topic_title || "Ready to begin"}</strong><p>{summary?.recommendation?.summary || "Your next recommendation will appear here."}</p></div><div><p className="eyebrow">Skill readiness</p><strong className="dashboard-number">{summary?.overall_skill_percentage || 0}%</strong><p>across recorded concepts</p></div></section><section className="profile-snapshot"><div><p className="eyebrow">Learner profile</p><strong>{learner.experience_level} · {learner.track.replaceAll("_", " ")}</strong><p>{learner.goal_text}</p>{learner.target_outcome && <p>{learner.target_outcome}</p>}</div><div><p className="eyebrow">Latest assessment</p><strong>{summary?.latest_assessment ? `${summary.latest_assessment.percentage}% · ${summary.latest_assessment.topic_title}` : "No assessment yet"}</strong><p>{summary?.latest_assessment ? "Your latest result is included in your learning state." : "Complete the diagnostic to establish your starting point."}</p></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary?.weak_concepts?.length ? summary.weak_concepts.slice(0, 3).map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open skill gaps</em>}</div></div><div><p className="eyebrow">Recommended next step</p><strong>{summary?.recommendation?.target_topic_title || "Start your learning path"}</strong><p>{summary?.recommendation?.next_action || "Your personalized path will guide the next activity."}</p></div></section><div className="dashboard-actions"><Link className="primary-button" to={`/learning-path/${learner.id}`}>{summary?.current_topic_id ? "Continue learning" : "Open my learning"}</Link><button className="secondary-button" onClick={signOut} type="button">Log out</button></div></main></div>;
   const [legacySummary, setLegacySummary] = useState(null);
   const [legacyCurriculum, setLegacyCurriculum] = useState(null);
   const [legacyError, setLegacyError] = useState("");
@@ -205,7 +222,7 @@ function DashboardPage() {
   function signOut() { logout(); navigate("/", { replace: true }); }
   if (error) return <div className="app-shell"><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to="/profile">Complete onboarding</Link></main></div>;
   if (!learner) return <main className="center-state"><span className="loading-mark">● ● ●</span><p>Loading your learning space...</p></main>;
-  return <div className="app-shell"><header className="dashboard-header"><Link className="brand-link" to="/">Adaptive AI</Link><nav><Link to="/dashboard">Dashboard</Link><Link to={`/learning-path/${learner.id}`}>My learning</Link><Link to="/profile">Profile</Link><button className="text-button" onClick={signOut} type="button">Log out</button></nav></header><main className="dashboard-shell"><p className="eyebrow">Your learning space</p><h1>Welcome, {learner.name}.</h1>{curriculum && <section className="course-banner"><div><p className="eyebrow">Current course</p><h2>{curriculum.course_title}</h2><p>{curriculum.description}</p></div><span>{curriculum.topics.length} topics · {curriculum.generation_source === "openrouter" ? "AI-generated" : curriculum.generation_source === "deterministic_fallback" ? "Fallback-generated" : "Source unrecorded"}</span></section>}<section className="dashboard-grid"><div><p className="eyebrow">Progress</p><strong className="dashboard-number">{summary?.progress_percentage || 0}%</strong><p>{summary?.completed_topics || 0} of {summary?.total_topics || 0} topics complete</p></div><div><p className="eyebrow">Current topic</p><strong>{summary?.current_topic_title || "Ready to begin"}</strong><p>{summary?.recommendation?.summary || "Your next recommendation will appear here."}</p></div><div><p className="eyebrow">Skill readiness</p><strong className="dashboard-number">{summary?.overall_skill_percentage || 0}%</strong><p>across recorded concepts</p></div></section><section className="profile-snapshot"><div><p className="eyebrow">Learner profile</p><strong>{learner.experience_level} · {learner.track.replaceAll("_", " ")}</strong><p>{learner.goal_text}</p>{learner.target_outcome && <p>{learner.target_outcome}</p>}</div><div><p className="eyebrow">Latest assessment</p><strong>{summary?.latest_assessment ? `${summary.latest_assessment.percentage}% · ${summary.latest_assessment.topic_title}` : "No assessment yet"}</strong><p>{summary?.latest_assessment ? "Your latest result is included in your learning state." : "Complete the diagnostic to establish your starting point."}</p></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary?.weak_concepts?.length ? summary.weak_concepts.slice(0, 3).map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open skill gaps</em>}</div></div><div><p className="eyebrow">Recommended next step</p><strong>{summary?.recommendation?.target_topic_title || "Start your learning path"}</strong><p>{summary?.recommendation?.next_action || "Your personalized path will guide the next activity."}</p></div></section><div className="dashboard-actions"><Link className="primary-button" to={`/learning-path/${learner.id}`}>{summary?.current_topic_id ? "Continue learning" : "Open my learning"}</Link><button className="secondary-button" onClick={signOut} type="button">Log out</button></div></main></div>;
+  return <div className="app-shell"><header className="dashboard-header"><Link className="brand-link" to="/">Adaptive AI</Link><nav><Link to="/dashboard">Dashboard</Link><button className="text-button" onClick={signOut} type="button">Log out</button></nav></header><main className="dashboard-shell"><p className="eyebrow">Your learning space</p><h1>Welcome, {learner.name}.</h1><section className="dashboard-grid"><div><p className="eyebrow">Progress</p><strong className="dashboard-number">{summary?.progress_percentage || 0}%</strong><p>{summary?.completed_topics || 0} of {summary?.total_topics || 0} topics complete</p></div><div><p className="eyebrow">Current topic</p><strong>{summary?.current_topic_title || "Ready to begin"}</strong><p>{summary?.recommendation?.summary || "Your next recommendation will appear here."}</p></div><div><p className="eyebrow">Skill readiness</p><strong className="dashboard-number">{summary?.overall_skill_percentage || 0}%</strong><p>across recorded concepts</p></div></section><section className="profile-snapshot"><div><p className="eyebrow">Learner profile</p><strong>{learner.experience_level} · {learner.track.replaceAll("_", " ")}</strong><p>{learner.goal_text}</p>{learner.target_outcome && <p>{learner.target_outcome}</p>}</div><div><p className="eyebrow">Latest assessment</p><strong>{summary?.latest_assessment ? `${summary.latest_assessment.percentage}% · ${summary.latest_assessment.topic_title}` : "No assessment yet"}</strong><p>{summary?.latest_assessment ? "Your latest result is included in your learning state." : "Complete the diagnostic to establish your starting point."}</p></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary?.weak_concepts?.length ? summary.weak_concepts.slice(0, 3).map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open skill gaps</em>}</div></div><div><p className="eyebrow">Recommended next step</p><strong>{summary?.recommendation?.target_topic_title || "Start your learning path"}</strong><p>{summary?.recommendation?.next_action || "Your personalized path will guide the next activity."}</p></div></section><div className="dashboard-actions"><Link className="primary-button" to={`/learning-path/${learner.id}`}>{summary?.current_topic_id ? "Continue learning" : "Open my learning"}</Link><button className="secondary-button" onClick={signOut} type="button">Log out</button></div></main></div>;
 }
 
 function ProgressHeader({ activeStep }) {
@@ -244,6 +261,7 @@ function ProfilePage() {
   const [isCustomGoal, setIsCustomGoal] = useState(false);
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [savingMessage, setSavingMessage] = useState("Saving profile...");
   const goalSelectionRef = useRef(null);
 
   useEffect(() => {
@@ -297,12 +315,15 @@ function ProfilePage() {
     event.preventDefault();
     setError("");
     setIsSaving(true);
+    setSavingMessage("Saving profile...");
     try {
       const learner = await createLearner({
         ...form,
         goal_key: isCustomGoal ? null : form.goal_key,
         custom_goal: isCustomGoal ? form.custom_goal : null,
       });
+      setSavingMessage("Generating your personalized course...");
+      await generateMyCurriculum();
       navigate(`/diagnostic/${learner.id}`);
     } catch (requestError) {
       setError(requestError.message);
@@ -326,8 +347,6 @@ function ProfilePage() {
         <button className="menu-toggle" aria-expanded={isMenuOpen} aria-controls="profile-navigation" aria-label={isMenuOpen ? "Close navigation" : "Open navigation"} onClick={() => setIsMenuOpen((open) => !open)} type="button"><span /><span /><span /></button>
         <nav id="profile-navigation" className={isMenuOpen ? "is-open" : ""} onClick={() => setIsMenuOpen(false)}>
           <Link to="/dashboard">Dashboard</Link>
-          {learnerId && <Link to={`/learning-path/${learnerId}`}>My learning</Link>}
-          <Link to="/profile">Profile</Link>
           <button className="text-button" onClick={signOut} type="button">Log out</button>
         </nav>
       </header>
@@ -402,7 +421,7 @@ function ProfilePage() {
           <input id="target-outcome" name="target_outcome" maxLength="240" value={form.target_outcome} onChange={updateField} placeholder="A project or capability you want to build" />
           <ErrorMessage message={error} />
           <button className="primary-button form-submit" disabled={isSaving || (!form.goal_key && !form.custom_goal)} type="submit">
-            {isSaving ? "Saving profile..." : "Begin diagnostic"}
+            {isSaving ? savingMessage : "Begin diagnostic"}
           </button>
         </form>
       </main>
@@ -422,8 +441,7 @@ function DiagnosticPage() {
   useEffect(() => {
     if (generationStarted.current) return;
     generationStarted.current = true;
-    generateMyCurriculum()
-      .then(() => generateDiagnostic(learnerId))
+    generateDiagnostic(learnerId)
       .then(setAssessment)
       .catch((requestError) => setError(requestError.message));
   }, [learnerId]);
@@ -442,7 +460,6 @@ function DiagnosticPage() {
         selected_option: answers[question.id],
       }));
       const analysis = await submitDiagnostic(learnerId, assessment.assessment_id, submittedAnswers);
-      await generateMyCurriculum();
       await getLearningPath(learnerId);
       navigate(`/analysis/${learnerId}?assessment_id=${analysis.assessment_id}`, { state: { analysis } });
     } catch (requestError) {
@@ -456,7 +473,7 @@ function DiagnosticPage() {
     return <div className="app-shell"><ProgressHeader activeStep={2} /><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to="/profile">Return to profile</Link></main></div>;
   }
   if (!assessment) {
-    return <div className="app-shell"><ProgressHeader activeStep={2} /><main className="center-state"><span className="loading-mark">● ● ●</span><p>Building a diagnostic around your goal...</p></main></div>;
+    return <div className="app-shell"><ProgressHeader activeStep={2} /><main className="center-state"><span className="loading-mark">● ● ●</span><WaitMessage>Creating your diagnostic...</WaitMessage></main></div>;
   }
 
   const answeredCount = Object.keys(answers).length;
@@ -553,21 +570,39 @@ function AnalysisPage() {
 
 function LearningPathPage() {
   const { learnerId } = useParams();
+  const [searchParams] = useSearchParams();
+  const courseId = searchParams.get("course_id");
   const [path, setPath] = useState(null);
+  const [currentCourse, setCurrentCourse] = useState(null);
   const [summary, setSummary] = useState(null);
   const [error, setError] = useState("");
+  const [courseError, setCourseError] = useState("");
   const [isRegenerating, setIsRegenerating] = useState(false);
 
   useEffect(() => {
-    getLearningPath(learnerId).then(setPath).catch((requestError) => setError(requestError.message));
+    setPath(null);
+    setCurrentCourse(null);
+    getLearningPath(learnerId, courseId)
+      .then((nextPath) => {
+        setPath(nextPath);
+        getMyCurriculum()
+          .then((curriculum) => {
+          const selectedCourse = curriculum.courses?.find(
+            (course) => String(course.course_id) === String(nextPath.course_id),
+          );
+          setCurrentCourse(selectedCourse || curriculum);
+          })
+          .catch((requestError) => setCourseError(requestError.message));
+      })
+      .catch((requestError) => setError(requestError.message));
     getLearnerSummary(learnerId).then(setSummary).catch(() => {});
-  }, [learnerId]);
+  }, [learnerId, courseId]);
 
   async function handleRegenerate() {
     setError("");
     setIsRegenerating(true);
     try {
-      setPath(await regenerateLearningPath(learnerId));
+      setPath(await regenerateLearningPath(learnerId, courseId));
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -579,34 +614,63 @@ function LearningPathPage() {
   if (!path) return <div className="app-shell"><main className="center-state"><span className="loading-mark">● ● ●</span><p>Assembling the sequence that fits you...</p></main></div>;
 
   const completedCount = path.topics.filter((topic) => topic.status === "completed").length;
+  const pathProgressPercentage = path.topics.length
+    ? Math.round((completedCount / path.topics.length) * 100)
+    : 0;
   return (
     <div className="app-shell">
       <main className="path-shell">
         <div className="page-back-row"><Link className="back-link" to="/dashboard">← Back to dashboard</Link><Link className="text-link" to="/profile">Change course</Link></div>
-        {summary && <section className="learner-overview"><div><p className="eyebrow">Learner dashboard</p><h2>{summary.name}</h2><p>{summary.goal}</p></div><div className="overview-stat"><strong>{summary.progress_percentage}%</strong><span>path progress</span></div><div className="overview-stat"><strong>{summary.overall_skill_percentage}%</strong><span>skill readiness</span></div>{summary.latest_assessment && <div className="overview-stat"><strong>{summary.latest_assessment.percentage}%</strong><span>latest assessment</span></div>}</section>}
+        {summary && <section className="learner-overview"><div><p className="eyebrow">Learner dashboard</p><h2>{summary.name}</h2><p>{currentCourse?.goal || summary.goal}</p></div><div className="overview-stat"><strong>{pathProgressPercentage}%</strong><span>course progress</span></div><div className="overview-stat"><strong>{summary.overall_skill_percentage}%</strong><span>skill readiness</span></div>{summary.latest_assessment && path.topics.some((topic) => topic.topic_id === summary.latest_assessment.topic_id) && <div className="overview-stat"><strong>{summary.latest_assessment.percentage}%</strong><span>latest course assessment</span></div>}</section>}
         <section className="path-heading">
           <div>
-            <p className="eyebrow">Step 04 / personalized path</p>
-            <h1>Built around your next move.</h1>
-            <p className="hero-copy">{path.overall_rationale}</p>
+            <p className="eyebrow">
+              {currentCourse
+                ? `Currently open course / ${currentCourse.track_name}`
+                : "Step 04 / personalized path"}
+            </p>
+            <h1>{currentCourse?.course_title || "Built around your next move."}</h1>
+            {currentCourse ? (
+              <>
+                <p className="hero-copy">{currentCourse.description}</p>
+                <p className="path-course-meta">
+                  {currentCourse.level} level · {currentCourse.estimated_duration}
+                </p>
+                <p className="path-course-goal"><strong>Course goal:</strong> {currentCourse.goal}</p>
+                {currentCourse.learning_objectives?.length > 0 && (
+                  <div className="path-course-objectives">
+                    <p className="eyebrow">What you will learn</p>
+                    <ul>
+                      {currentCourse.learning_objectives.map((objective) => (
+                        <li key={objective}>{objective}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="hero-copy">{path.overall_rationale}</p>
+            )}
           </div>
           <div className="path-summary"><strong>{completedCount}/{path.topics.length}</strong><span>topics completed</span></div>
         </section>
-        <section className="path-progress-panel" aria-label="Learning progress"><div className="path-progress-heading"><div><p className="eyebrow">Current status</p><strong>{summary?.progress_percentage || 0}% complete</strong></div><span>{completedCount} of {path.topics.length} topics complete</span></div><div className="path-progress-bar"><span style={{ width: `${summary?.progress_percentage || 0}%` }} /></div><p>{path.current_topic_title ? `Next up: ${path.current_topic_title}` : "Your learning path is ready."}</p></section>
+        {currentCourse && <p className="path-reason">{path.overall_rationale}</p>}
+        <ErrorMessage message={courseError} />
+        <section className="path-progress-panel" aria-label="Learning progress"><div className="path-progress-heading"><div><p className="eyebrow">Current status</p><strong>{pathProgressPercentage}% complete</strong></div><span>{completedCount} of {path.topics.length} topics complete</span></div><div className="path-progress-bar"><span style={{ width: `${pathProgressPercentage}%` }} /></div><p>{path.current_topic_title ? `Next up: ${path.current_topic_title}` : "Your learning path is ready."}</p></section>
         <div className="path-toolbar"><span>{path.current_topic_title ? `Current focus: ${path.current_topic_title}` : "Path ready for learning"}</span><button className="secondary-button" disabled={isRegenerating} onClick={handleRegenerate} type="button">{isRegenerating ? "Recalculating..." : "Recalculate path"}</button></div>
         <ErrorMessage message={error} />
-        {summary?.recommendation && <section className={`recommendation-strip ${summary.recommendation.action_type}`}><div><p className="eyebrow">Current recommendation</p><strong>{summary.recommendation.target_topic_title || "Continue your path"}</strong><p>{summary.recommendation.summary}</p></div><span>{summary.recommendation.action_type}</span></section>}
-        {summary && <section className="concept-overview"><div><p className="eyebrow">Strong concepts</p><div className="mini-tags">{summary.strong_concepts.length ? summary.strong_concepts.map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No strong concepts recorded yet</em>}</div></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary.weak_concepts.length ? summary.weak_concepts.map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open weaknesses</em>}</div></div></section>}
+        {!courseId && summary?.recommendation && <section className={`recommendation-strip ${summary.recommendation.action_type}`}><div><p className="eyebrow">Current recommendation</p><strong>{summary.recommendation.target_topic_title || "Continue your path"}</strong><p>{summary.recommendation.summary}</p></div><span>{summary.recommendation.action_type}</span></section>}
+        {!courseId && summary && <section className="concept-overview"><div><p className="eyebrow">Strong concepts</p><div className="mini-tags">{summary.strong_concepts.length ? summary.strong_concepts.map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No strong concepts recorded yet</em>}</div></div><div><p className="eyebrow">Needs attention</p><div className="mini-tags weak-tags">{summary.weak_concepts.length ? summary.weak_concepts.map((concept) => <span key={concept.concept}>{concept.concept.replaceAll("_", " ")}</span>) : <em>No open weaknesses</em>}</div></div></section>}
         <section className="path-list">
           {path.topics.map((topic, index) => (
             <article className={`path-card ${topic.status}`} key={topic.topic_id}>
               <div className="path-index">{String(index + 1).padStart(2, "0")}</div>
               <div className="path-card-main">
-                <div className="path-card-heading"><div><p className="path-status">{topic.status}</p>{topic.topic_id === path.current_topic_id ? <Link className="path-topic-link" to={`/learn/${learnerId}`}><h2>{topic.title}</h2></Link> : <h2>{topic.title}</h2>}</div><span className="difficulty-label">{topic.difficulty}</span></div>
+                <div className="path-card-heading"><div><p className="path-status">{topic.status}</p>{topic.topic_id === path.current_topic_id ? <Link className="path-topic-link" to={`/learn/${learnerId}?course_id=${encodeURIComponent(path.course_id || "")}`}><h2>{topic.title}</h2></Link> : <h2>{topic.title}</h2>}</div><span className="difficulty-label">{topic.difficulty}</span></div>
                 <p className="path-reason">{topic.reason}</p>
                 {topic.prerequisites.length > 0 && <p className="prerequisite-line"><strong>Prerequisites:</strong> {topic.prerequisites.join(", ")}</p>}
               </div>
-              {topic.topic_id === path.current_topic_id && <Link className="current-marker" to={`/learn/${learnerId}`} aria-label={`Open ${topic.title} learning experience`}>Next</Link>}
+              {topic.topic_id === path.current_topic_id && <Link className="current-marker" to={`/learn/${learnerId}?course_id=${encodeURIComponent(path.course_id || "")}`} aria-label={`Open ${topic.title} learning experience`}>Next</Link>}
             </article>
           ))}
         </section>
@@ -617,6 +681,8 @@ function LearningPathPage() {
 
 function LearningExperiencePage() {
   const { learnerId } = useParams();
+  const [searchParams] = useSearchParams();
+  const courseId = searchParams.get("course_id");
   const navigate = useNavigate();
   const [currentTopic, setCurrentTopic] = useState(null);
   const [learningContent, setLearningContent] = useState(null);
@@ -627,14 +693,14 @@ function LearningExperiencePage() {
   const [isAskingTutor, setIsAskingTutor] = useState(false);
 
   useEffect(() => {
-    getCurrentTopic(learnerId)
+    getCurrentTopic(learnerId, courseId)
       .then((topic) => {
         setCurrentTopic(topic);
         return getLearningContent(learnerId, topic.topic_id);
       })
       .then(setLearningContent)
       .catch((requestError) => setError(requestError.message));
-  }, [learnerId]);
+  }, [learnerId, courseId]);
 
   async function handleComplete() {
     setError("");
@@ -642,7 +708,7 @@ function LearningExperiencePage() {
     try {
       await completeTopic(learnerId, currentTopic.topic_id);
       const assessment = await generateAssessment(learnerId, currentTopic.topic_id);
-      navigate(`/assessment/${learnerId}/${assessment.assessment_id}`);
+      navigate(`/assessment/${learnerId}/${assessment.assessment_id}?course_id=${encodeURIComponent(courseId || currentTopic.course_id || "")}`);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -667,16 +733,16 @@ function LearningExperiencePage() {
     }
   }
 
-  if (error && !learningContent) return <div className="app-shell"><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to={`/learning-path/${learnerId}`}>Return to learning path</Link></main></div>;
-  if (!currentTopic || !learningContent) return <div className="app-shell"><main className="center-state"><span className="loading-mark">● ● ●</span><p>Preparing a lesson for your current focus...</p></main></div>;
+  if (error && !learningContent) return <div className="app-shell"><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to={`/learning-path/${learnerId}?course_id=${encodeURIComponent(courseId || "")}`}>Return to learning path</Link></main></div>;
+  if (!currentTopic || !learningContent) return <div className="app-shell"><main className="center-state"><span className="loading-mark">● ● ●</span><WaitMessage>Generating your lesson...</WaitMessage></main></div>;
 
   const content = learningContent.content;
   return (
     <div className="app-shell">
       <main className="lesson-shell">
         <header className="lesson-heading">
-          <div><p className="eyebrow">Learn / topic {currentTopic.position} of {currentTopic.total_topics}</p><h1>{content.topic_title}</h1><p className="hero-copy">{content.overview}</p></div>
-          <div className="lesson-status"><span>{learningContent.source === "openrouter" ? "Personalized lesson" : "Curated lesson"}</span><strong>{currentTopic.status.replace("_", " ")}</strong></div>
+          <div><p className="eyebrow">Learn / topic {currentTopic.position} of {currentTopic.total_topics}</p><h1>{currentTopic.course_title || content.topic_title}</h1><p className="hero-copy"><strong>Topic:</strong> {currentTopic.title}. {content.overview}</p></div>
+          <div className="lesson-status"><span>{learningContent.source === "cache" ? "Saved personalized lesson" : learningContent.source === "openrouter" ? "Personalized lesson" : "Curated lesson"}</span><strong>{currentTopic.status.replace("_", " ")}</strong></div>
         </header>
         <div className="lesson-layout">
           <aside className="lesson-sidebar">
@@ -706,12 +772,12 @@ function LearningExperiencePage() {
                   {tutorAnswer.weak_concepts?.length > 0 && <div className="mini-tags weak-tags">{tutorAnswer.weak_concepts.map((concept) => <span key={concept}>{concept.replaceAll("_", " ")}</span>)}</div>}
                   {tutorAnswer.course_connection && <p><strong>Course connection:</strong> {tutorAnswer.course_connection}</p>}
                   {tutorAnswer.follow_up && <strong>{tutorAnswer.follow_up}</strong>}
-                  {tutorAnswer.module_title && <Link className="text-link tutor-module-link" to={`/learn/${learnerId}`}>Open Module: {tutorAnswer.module_title}</Link>}
+                  {tutorAnswer.module_title && <Link className="text-link tutor-module-link" to={`/learn/${learnerId}?course_id=${encodeURIComponent(courseId || "")}`}>Open Module: {tutorAnswer.module_title}</Link>}
                 </div>
               )}
             </section>
             <ErrorMessage message={error} />
-            <div className="lesson-actions"><button className="primary-button" disabled={isCompleting} onClick={handleComplete} type="button">{isCompleting ? "Saving progress..." : "Mark topic complete"}</button><Link className="text-link" to={`/learning-path/${learnerId}`}>Back to path</Link></div>
+            <div className="lesson-actions"><button className="primary-button" disabled={isCompleting} onClick={handleComplete} type="button">{isCompleting ? "Saving progress..." : "Mark topic complete"}</button><Link className="text-link" to={`/learning-path/${learnerId}?course_id=${encodeURIComponent(courseId || currentTopic.course_id || "")}`}>Back to path</Link></div>
           </article>
         </div>
       </main>
@@ -721,10 +787,13 @@ function LearningExperiencePage() {
 
 function AssessmentResult({ learnerId, result, onRetry, isRetrying }) {
   const weak = result.weak_concepts || [];
+  const courseQuery = result.course_id
+    ? `?course_id=${encodeURIComponent(result.course_id)}`
+    : "";
   return (
     <main className="assessment-result-shell">
       <section className="result-heading"><p className="eyebrow">Assessment result / {result.topic_title}</p><h1>Now we know what changed.</h1><p className="hero-copy">Your result is now part of the learner state that controls what comes next.</p><div className="result-score"><strong>{result.percentage}%</strong><span>{result.correct_count} / {result.total_questions} correct</span></div></section>
-      <section className="result-grid"><div><h2>Concept performance</h2>{result.concept_results.map((concept) => <div className="result-concept" key={concept.concept}><div><span>{concept.concept.replaceAll("_", " ")}</span><strong>{concept.percentage}%</strong></div><div className="skill-bar"><span className={`skill-fill ${concept.level}`} style={{ width: `${concept.percentage}%` }} /></div><p>{concept.level}</p></div>)}</div><div className={`adaptation-card ${result.recommendation.action_type}`}><p className="eyebrow">What changed based on your result?</p><h2>{weak.length ? weak.map((concept) => concept.replaceAll("_", " ")).join(", ") : "Your next step"}</h2><p>{result.recommendation.summary}</p><strong>{result.recommendation.next_action}</strong>{result.recommendation.remediation && <blockquote>{result.recommendation.remediation}</blockquote>}{result.recommendation.practice_suggestion && <p><strong>Targeted practice:</strong> {result.recommendation.practice_suggestion}</p>}{result.recommendation.remediation_source && <p className="ai-source-label">{result.recommendation.remediation_source === "openrouter" ? "AI remediation" : "Deterministic remediation"}</p>}</div></section>
+      <section className="result-grid"><div><h2>Concept performance</h2>{result.concept_results.map((concept) => <div className="result-concept" key={concept.concept}><div><span>{concept.concept.replaceAll("_", " ")}</span><strong>{concept.percentage}%</strong></div><div className="skill-bar"><span className={`skill-fill ${concept.level}`} style={{ width: `${concept.percentage}%` }} /></div><p>{concept.level}</p></div>)}</div><div className={`adaptation-card ${result.recommendation.action_type}`}><p className="eyebrow">What changed based on your result?</p><h2>{weak.length ? weak.map((concept) => concept.replaceAll("_", " ")).join(", ") : "Your next step"}</h2><p>{result.recommendation.summary}</p><strong>{result.recommendation.next_action}</strong>{result.recommendation.remediation && <blockquote>{result.recommendation.remediation}</blockquote>}{result.recommendation.alternative_explanation && <p><strong>Another way to think about it:</strong> {result.recommendation.alternative_explanation}</p>}{result.recommendation.example && <p><strong>Example:</strong> {result.recommendation.example}</p>}{result.recommendation.practice_suggestion && <p><strong>Targeted practice:</strong> {result.recommendation.practice_suggestion}</p>}{result.recommendation.remediation_next_action && <p><strong>Remediation next step:</strong> {result.recommendation.remediation_next_action}</p>}{result.recommendation.remediation_source && <p className="ai-source-label">{result.recommendation.remediation_source === "openrouter" ? "AI remediation" : "Deterministic remediation"}</p>}</div></section>
       {result.question_review && result.question_review.length > 0 && (
         <section className="result-review-panel">
           <h2>Question-by-question feedback</h2>
@@ -750,7 +819,7 @@ function AssessmentResult({ learnerId, result, onRetry, isRetrying }) {
           </div>
         </section>
       )}
-      <div className="result-actions"><Link className="primary-button" to={weak.length ? `/learn/${learnerId}` : `/learning-path/${learnerId}`}>{weak.length ? "Review weak topic" : "Continue learning"}</Link><button className="secondary-button" disabled={isRetrying} onClick={onRetry} type="button">{isRetrying ? "Preparing retry..." : "Retry assessment"}</button></div>
+      <div className="result-actions"><Link className="primary-button" to={weak.length ? `/learn/${learnerId}${courseQuery}` : `/learning-path/${learnerId}${courseQuery}`}>{weak.length ? "Review weak topic" : "Continue learning"}</Link><button className="secondary-button" disabled={isRetrying} onClick={onRetry} type="button">{isRetrying ? "Preparing retry..." : "Retry assessment"}</button></div>
     </main>
   );
 }
@@ -803,9 +872,9 @@ function AssessmentPage() {
     }
   }
 
-  if (error) return <div className="app-shell"><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to={`/learning-path/${learnerId}`}>Return to path</Link></main></div>;
+  if (error) return <div className="app-shell"><main className="center-state"><ErrorMessage message={error} /><Link className="text-link" to={`/learning-path/${learnerId}?course_id=${encodeURIComponent(result?.course_id || "")}`}>Return to path</Link></main></div>;
   if (result) return <div className="app-shell"><AssessmentResult learnerId={learnerId} result={result} onRetry={handleRetry} isRetrying={isRetrying} /></div>;
-  if (!assessment) return <div className="app-shell"><main className="center-state"><span className="loading-mark">● ● ●</span><p>Preparing your topic assessment...</p></main></div>;
+  if (!assessment) return <div className="app-shell"><main className="center-state"><span className="loading-mark">● ● ●</span><WaitMessage>Preparing your assessment...</WaitMessage></main></div>;
 
   const answeredCount = Object.keys(answers).length;
   return <div className="app-shell"><main className="assessment-shell post-learning-assessment"><section className="assessment-heading"><p className="eyebrow">Assess / {assessment.topic_title}</p><h1>Show what stuck.</h1><p className="hero-copy">Answer these questions from the topic you just completed. Your result will shape the next recommendation.</p><div className="question-progress"><span style={{ width: `${(answeredCount / assessment.questions.length) * 100}%` }} /></div><p className="progress-copy">{answeredCount} of {assessment.questions.length} answered</p></section><form className="question-list" onSubmit={handleSubmit}>{assessment.questions.map((question, index) => <fieldset className="question-card" key={question.question_id}><legend><span>0{index + 1}</span>{question.question}</legend><div className="option-list">{question.options.map((option, optionIndex) => <label className={answers[question.question_id] === optionIndex ? "option selected" : "option"} key={option}><input checked={answers[question.question_id] === optionIndex} onChange={() => setAnswers((current) => ({ ...current, [question.question_id]: optionIndex }))} type="radio" name={question.question_id} /><span>{option}</span></label>)}</div></fieldset>)}<ErrorMessage message={error} /><button className="primary-button form-submit" disabled={isSubmitting || answeredCount !== assessment.questions.length} type="submit">{isSubmitting ? "Scoring your result..." : "Submit assessment"}</button></form></main></div>;

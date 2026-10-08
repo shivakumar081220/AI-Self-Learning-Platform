@@ -21,13 +21,16 @@ class FakeAssessmentProvider:
 
     def __init__(self, **kwargs):
         self.chat = SimpleNamespace(
-            completions=SimpleNamespace(create=self.create_completion)
+            completions=SimpleNamespace(
+                with_raw_response=SimpleNamespace(create=self.create_raw_response)
+            )
         )
 
-    def create_completion(self, **kwargs):
-        return SimpleNamespace(
+    def create_raw_response(self, **kwargs):
+        response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=self.response_content))]
         )
+        return SimpleNamespace(status_code=200, parse=lambda: response)
 
 
 @pytest.fixture
@@ -96,12 +99,16 @@ def test_assessment_requires_learned_topic_and_hides_answer_keys(client: TestCli
     assert generated["source"] == "curated_fallback"
     assert all("correct_option" not in question for question in generated["questions"])
     assert all("explanation" not in question for question in generated["questions"])
+    assert all("concept" in question and "difficulty" in question for question in generated["questions"])
+    repeated = generate_assessment(client, learner_id, topic_id)
+    assert repeated["assessment_id"] == generated["assessment_id"]
+    assert repeated["source"] == generated["source"]
 
 
 def test_generated_topic_with_one_concept_gets_three_fallback_questions():
     topic = Topic(
         id="generated-one-concept",
-        title="Agent Planning",
+        title="Agent Planning · 123-1",
         description="Plan a bounded sequence of tool calls for an AI agent.",
         difficulty="intermediate",
         concept_tags=["agent_planning"],
@@ -112,6 +119,7 @@ def test_generated_topic_with_one_concept_gets_three_fallback_questions():
     assert len(question_set.questions) == 3
     assert len({question.question_id for question in question_set.questions}) == 3
     assert {question.concept for question in question_set.questions} == {"agent_planning"}
+    assert all("123-1" not in question.question for question in question_set.questions)
 
 
 def test_assessment_endpoint_falls_back_for_generated_one_concept_topic(

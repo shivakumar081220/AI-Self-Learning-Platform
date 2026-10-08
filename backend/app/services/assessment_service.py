@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from pydantic import ValidationError
@@ -7,7 +8,12 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import Topic
 from ..schemas import AssessmentQuestionSet
-from .ai_provider import request_structured_json
+from ..topic_titles import display_topic_title
+from .ai_cache import get_or_generate_artifact
+from .ai_provider import AIProviderError, request_structured_json
+
+
+logger = logging.getLogger(__name__)
 
 
 QUESTION_BANK: dict[str, list[dict[str, Any]]] = {
@@ -102,7 +108,7 @@ def _fallback_questions(
             concept_text = concept.replace("_", " ")
             template_index = (template_offset + candidate_number) % len(templates)
             question_text = templates[template_index].format(
-                title=topic.title,
+                title=display_topic_title(topic.title),
                 concept=concept_text,
             )
             fingerprint = _question_fingerprint(question_text)
@@ -145,7 +151,7 @@ def _openrouter_questions(
         },
         "topic": {
             "id": topic.id,
-            "title": topic.title,
+            "title": display_topic_title(topic.title),
             "description": topic.description,
             "concepts": topic.concept_tags,
             "difficulty": topic.difficulty,
@@ -154,17 +160,19 @@ def _openrouter_questions(
         "previous_questions_to_avoid": [
             item.get("question", "") for item in previous_questions
         ],
-        "schema": AssessmentQuestionSet.model_json_schema(),
     }
     parsed = request_structured_json(
+        operation="topic_assessment_questions",
         system_prompt=(
             "Create rigorous MCQs only for the supplied Generative AI topic. Use only the supplied concept tags, "
-            "adapt difficulty to the learner, avoid repeating any previous question or scenario, and keep correct_option zero-based."
+            "adapt difficulty to the learner, avoid repeating any previous question or scenario, and keep "
+            "correct_option zero-based. Return only exact schema fields with the declared JSON types and no "
+            "additional fields."
         ),
         user_payload=context,
         response_model=AssessmentQuestionSet,
         temperature=0.2,
-        max_tokens=1800,
+        max_tokens=1400,
     )
     allowed_concepts = set(topic.concept_tags)
     if any(question.concept not in allowed_concepts for question in parsed.questions):
@@ -182,18 +190,51 @@ def _openrouter_questions(
 
 
 def generate_assessment_questions(
+    database: Session,
     topic: Topic,
     learner: Any,
     weak_concepts: list[str] | None = None,
     previous_questions: list[dict[str, Any]] | None = None,
 ) -> tuple[AssessmentQuestionSet, str]:
     previous_questions = previous_questions or []
-    if settings.openrouter_api_key:
-        try:
-            return (
-                _openrouter_questions(topic, learner, weak_concepts or [], previous_questions),
-                "openrouter",
-            )
-        except (Exception, ValidationError):
-            pass
-    return _fallback_questions(topic, previous_questions), "curated_fallback"
+
+    def generate() -> tuple[AssessmentQuestionSet, str]:
+        if settings.openrouter_api_key:
+            try:
+                return (
+                    _openrouter_questions(topic, learner, weak_concepts or [], previous_questions),
+                    "openrouter",
+                )
+            except (AIProviderError, ValidationError, ValueError) as error:
+                logger.warning(
+                    "AI operation used curated fallback; operation=topic_assessment_questions reason=%s",
+                    type(error).__name__,
+                )
+        return _fallback_questions(topic, previous_questions), "curated_fallback"
+
+    return get_or_generate_artifact(
+        database,
+        learner_id=learner.id,
+        operation="topic_assessment_questions",
+        key_context={
+            "topic": {
+                "id": topic.id,
+                "description": topic.description,
+                "concepts": topic.concept_tags,
+                "difficulty": topic.difficulty,
+            },
+            "learner": {
+                "goal": learner.goal_text,
+                "experience_level": learner.experience_level,
+                "target_outcome": learner.target_outcome,
+            },
+            "weak_concepts": sorted(weak_concepts or []),
+            "previous_question_fingerprints": [
+                _question_fingerprint(item.get("question", ""))
+                for item in previous_questions
+            ],
+        },
+        response_model=AssessmentQuestionSet,
+        generate=generate,
+        fallback=lambda: _fallback_questions(topic, previous_questions),
+    )

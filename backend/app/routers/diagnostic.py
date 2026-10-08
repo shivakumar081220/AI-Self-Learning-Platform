@@ -60,7 +60,8 @@ def _diagnostic_question_review(assessment: Assessment) -> list[QuestionReviewIt
     ]
 
 
-@router.post("/generate", response_model=DiagnosticGenerateResponse)
+@router.post("", response_model=DiagnosticGenerateResponse)
+@router.post("/generate", response_model=DiagnosticGenerateResponse, include_in_schema=False)
 def generate_learner_diagnostic(
     learner_id: int, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
 ) -> DiagnosticGenerateResponse:
@@ -69,11 +70,40 @@ def generate_learner_diagnostic(
         raise HTTPException(status_code=404, detail="Learner not found")
     ensure_learner_access(learner, user)
 
+    pending_assessment = database.scalar(
+        select(Assessment)
+        .where(
+            Assessment.learner_id == learner_id,
+            Assessment.assessment_type == "diagnostic",
+            Assessment.completed_at.is_(None),
+        )
+        .order_by(Assessment.created_at.desc())
+    )
+    if pending_assessment:
+        generated_by = (pending_assessment.feedback_json or {}).get(
+            "generation_source", "curated_fallback"
+        )
+        return DiagnosticGenerateResponse(
+            assessment_id=pending_assessment.id,
+            questions=[
+                DiagnosticQuestionPublic(
+                    id=question["id"],
+                    question=question["question"],
+                    options=question["options"],
+                    concept=question["concept"],
+                    difficulty=question["difficulty"],
+                )
+                for question in pending_assessment.questions_json
+            ],
+            generated_by=generated_by,
+        )
+
     question_set, generated_by = generate_diagnostic(learner, database)
     assessment = Assessment(
         learner_id=learner_id,
         assessment_type="diagnostic",
         questions_json=[question.model_dump() for question in question_set.questions],
+        feedback_json={"generation_source": generated_by},
     )
     database.add(assessment)
     database.commit()
@@ -85,6 +115,8 @@ def generate_learner_diagnostic(
                 id=question.id,
                 question=question.question,
                 options=question.options,
+                concept=question.concept,
+                difficulty=question.difficulty,
             )
             for question in question_set.questions
         ],

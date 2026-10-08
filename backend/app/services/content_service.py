@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from pydantic import ValidationError
@@ -7,7 +8,13 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import Assessment, Learner, SkillScore, Topic, TopicPrerequisite, TopicProgress
 from ..schemas import CodingExample, LearningContent
-from .ai_provider import request_structured_json
+from ..topic_titles import display_topic_title
+from ..track_catalog import TRACK_BY_ID
+from .ai_cache import get_or_generate_artifact
+from .ai_provider import AIProviderError, request_structured_json
+
+
+logger = logging.getLogger(__name__)
 
 
 CURATED_CONTENT: dict[str, dict[str, Any]] = {
@@ -255,7 +262,8 @@ def _is_technical_topic(topic: Topic) -> bool:
 
 
 def _fallback_coding_example(topic: Topic) -> CodingExample:
-    text = " ".join([topic.title, *topic.concept_tags]).lower()
+    topic_title = display_topic_title(topic.title)
+    text = " ".join([topic_title, *topic.concept_tags]).lower()
     if "embedding" in text or "vector" in text:
         code = (
             "from math import sqrt\n\n"
@@ -308,11 +316,11 @@ def _fallback_coding_example(topic: Topic) -> CodingExample:
         explanation = "A message object keeps user input explicit and separate from application rules."
         mistake = "Sending unvalidated user input as trusted system instructions."
     return CodingExample(
-        title=f"Try {topic.title} in Python",
+        title=f"Try {topic_title} in Python",
         code=code,
         explanation=explanation,
         expected_output=output,
-        why_it_matters=f"A small executable model makes the core idea in {topic.title} concrete.",
+        why_it_matters=f"A small executable model makes the core idea in {topic_title} concrete.",
         common_mistake=mistake,
     )
 
@@ -323,21 +331,27 @@ def _fallback_content(
     weak_concepts: list[str],
     prerequisites: list[str],
 ) -> LearningContent:
+    topic_title = display_topic_title(topic.title)
     data = CURATED_CONTENT.get(topic.id)
     if not data:
+        track_name = TRACK_BY_ID.get(learner.track, TRACK_BY_ID["generative_ai"]).name
         data = {
             "overview": topic.description,
             "learning_objectives": [
-                f"Explain the core ideas in {topic.title}",
-                "Apply the topic in a Generative AI workflow",
+                f"Explain the core ideas in {topic_title}",
+                f"Apply the topic in a {track_name} task",
             ],
-            "explanation": f"This lesson introduces {topic.title}. Start with the concepts {', '.join(topic.concept_tags)} and connect them to the goal of {learner.goal_text}.",
-            "key_concepts": (topic.concept_tags[:6] + ["application practice"])[:6] if topic.concept_tags else [topic.title, "application practice"],
-            "examples": [f"Use {topic.title} as one step in a small AI application aligned to your goal."],
-            "practical_example": f"Design a small exercise that applies {topic.title} to {learner.goal_text}.",
+            "explanation": f"This lesson introduces {topic_title}. Start with the concepts {', '.join(topic.concept_tags)} and connect them to the goal of {learner.goal_text}.",
+            "key_concepts": (
+                [concept.replace("_", " ") for concept in topic.concept_tags[:6]]
+                if topic.concept_tags
+                else [topic_title]
+            ),
+            "examples": [f"Use {topic_title} in a task aligned to your goal: {learner.goal_text}."],
+            "practical_example": f"Design a small exercise that applies {topic_title} to {learner.goal_text}.",
             "common_mistakes": ["Skipping the topic prerequisites", "Treating a model output as automatically correct"],
-            "quick_recap": [f"{topic.title} is part of your generated curriculum.", "Validate outputs and connect practice to your goal."],
-            "analogy": f"Think of {topic.title} as a building block in the larger system you are learning to design.",
+            "quick_recap": [f"{topic_title} is part of your generated curriculum.", "Validate outputs and connect practice to your goal."],
+            "analogy": f"Think of {topic_title} as a building block in the larger system you are learning to design.",
             "important_notes": ["This is deterministic fallback material because the AI provider was unavailable."],
         }
     else:
@@ -351,14 +365,14 @@ def _fallback_content(
         explanation += " At an advanced level, focus on the trade-offs between quality, control, and system complexity."
     payload = {
         "topic_id": topic.id,
-        "topic_title": topic.title,
+        "topic_title": topic_title,
         **data,
         "explanation": explanation,
         "real_world_example": data.get("real_world_example", data["practical_example"]),
         "prerequisites": prerequisites,
         "practice_suggestion": data.get(
             "practice_suggestion",
-            f"Explain {topic.title} in your own words, then apply it to {learner.goal_text}.",
+            f"Explain {topic_title} in your own words, then apply it to {learner.goal_text}.",
         ),
     }
     if _is_technical_topic(topic):
@@ -381,18 +395,19 @@ def _openrouter_content(
             "target_outcome": learner.target_outcome,
             "track_id": learner.track,
             "weak_concepts": weak_concepts,
-            "completed_topics": completed_topics,
-            "recent_assessments": recent_assessments,
+            "completed_topics": completed_topics[-3:],
+            "recent_assessments": recent_assessments[:2],
         },
         "current_topic": {
             "id": topic.id,
-            "title": topic.title,
+            "title": display_topic_title(topic.title),
             "description": topic.description,
             "concepts": topic.concept_tags,
         },
         "prerequisites": prerequisites,
     }
     parsed = request_structured_json(
+        operation="learning_content",
         system_prompt=(
             "You are a careful Generative AI instructor. Teach only the supplied current topic. "
             "Adapt depth to experience, goal, and weak concepts. Include a short real-world example, "
@@ -400,18 +415,44 @@ def _openrouter_content(
             "include a structured Python coding example with title, code, explanation, expected output "
             "when useful, why it matters, and a common mistake. Return JSON matching the requested "
             "learning-content schema. Keep topic_id and topic_title exactly equal to the supplied values. "
+            "All required schema fields must be present with their declared JSON types; omit unsupported "
+            "properties and return no additional fields. Use valid JSON only, without Markdown or code fences. "
             "Do not invent topic IDs or unrelated curriculum topics."
         ),
-        user_payload={"schema": LearningContent.model_json_schema(), "context": context},
+        user_payload={"context": context},
         response_model=LearningContent,
         temperature=0.3,
-        max_tokens=3500,
+        max_tokens=2600,
     )
-    if parsed.topic_id != topic.id or parsed.topic_title != topic.title:
+    if parsed.topic_id != topic.id or parsed.topic_title != display_topic_title(topic.title):
+        logger.warning(
+            "OpenRouter structured response failed semantic validation; operation=learning_content "
+            "model=%s validation_error=topic_identity_mismatch missing_fields=[] unexpected_fields=[]",
+            settings.openrouter_model,
+        )
         raise ValueError("AI content topic does not match the curated topic")
     if not parsed.real_world_example or not parsed.practice_suggestion:
+        missing_fields = [
+            field
+            for field, value in (
+                ("real_world_example", parsed.real_world_example),
+                ("practice_suggestion", parsed.practice_suggestion),
+            )
+            if not value
+        ]
+        logger.warning(
+            "OpenRouter structured response failed semantic validation; operation=learning_content "
+            "model=%s validation_error=missing_learning_guidance missing_fields=%s unexpected_fields=[]",
+            settings.openrouter_model,
+            missing_fields,
+        )
         raise ValueError("AI lesson is missing required learning guidance")
     if _is_technical_topic(topic) and not parsed.coding_example:
+        logger.warning(
+            "OpenRouter structured response failed semantic validation; operation=learning_content "
+            "model=%s validation_error=missing_coding_example missing_fields=[coding_example] unexpected_fields=[]",
+            settings.openrouter_model,
+        )
         raise ValueError("AI lesson is missing its required coding example")
     return parsed.model_copy(
         update={
@@ -443,21 +484,58 @@ def generate_learning_content(
     ).all()
     prerequisites = [item.title for item in prerequisite_topics]
     assessments = database.scalars(
-        select(Assessment).where(Assessment.learner_id == learner.id).order_by(Assessment.created_at.desc()).limit(5)
+        select(Assessment)
+        .where(Assessment.learner_id == learner.id, Assessment.topic_id == topic.id)
+        .order_by(Assessment.created_at.desc())
+        .limit(2)
     ).all()
     recent_assessments = [
         {"topic_id": item.topic_id, "score": item.score}
         for item in assessments
         if item.topic_id and item.score is not None
     ]
-    if settings.openrouter_api_key:
-        try:
-            return (
-                _openrouter_content(
-                    topic, learner, weak_concepts, completed_topics, recent_assessments, prerequisites
-                ),
-                "openrouter",
-            )
-        except (Exception, ValidationError):
-            pass
-    return _fallback_content(topic, learner, weak_concepts, prerequisites), "curated_fallback"
+    cache_context = {
+        "topic_id": topic.id,
+        "topic_description": topic.description,
+        "learner": {
+            "experience_level": learner.experience_level,
+            "goal": learner.goal_text,
+            "target_outcome": learner.target_outcome,
+            "track": learner.track,
+        },
+        "weak_concepts": sorted(weak_concepts),
+        "completed_topics": sorted(item.topic_id for item in progress if item.status == "completed"),
+        "recent_assessments": recent_assessments,
+        "prerequisites": prerequisites,
+    }
+
+    def generate() -> tuple[LearningContent, str]:
+        if settings.openrouter_api_key:
+            try:
+                return (
+                    _openrouter_content(
+                        topic,
+                        learner,
+                        weak_concepts,
+                        completed_topics,
+                        recent_assessments,
+                        prerequisites,
+                    ),
+                    "openrouter",
+                )
+            except (AIProviderError, ValidationError, ValueError) as error:
+                logger.warning(
+                    "AI operation used curated fallback; operation=learning_content reason=%s",
+                    type(error).__name__,
+                )
+        return _fallback_content(topic, learner, weak_concepts, prerequisites), "curated_fallback"
+
+    return get_or_generate_artifact(
+        database,
+        learner_id=learner.id,
+        operation="learning_content",
+        key_context=cache_context,
+        response_model=LearningContent,
+        generate=generate,
+        fallback=lambda: _fallback_content(topic, learner, weak_concepts, prerequisites),
+    )

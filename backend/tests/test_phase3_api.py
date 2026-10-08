@@ -61,7 +61,8 @@ def test_diagnostic_generation_hides_internal_metadata(client: TestClient):
     assert body["generated_by"] == "curated_fallback"
     assert len(body["questions"]) == 8
     assert all("correct_option" not in question for question in body["questions"])
-    assert all("concept" not in question for question in body["questions"])
+    assert all("concept" in question and "difficulty" in question for question in body["questions"])
+    assert all("correct_option" not in question and "explanation" not in question for question in body["questions"])
 
 
 def test_diagnostic_submission_persists_deterministic_skill_scores(client: TestClient):
@@ -142,7 +143,9 @@ def test_ai_failure_uses_curated_fallback(monkeypatch, client: TestClient):
     monkeypatch.setattr(
         diagnostic_service,
         "_openrouter_questions",
-        lambda learner, database: (_ for _ in ()).throw(RuntimeError("timeout")),
+        lambda learner, database: (_ for _ in ()).throw(
+            diagnostic_service.AIProviderError("timeout")
+        ),
     )
 
     response = client.post(f"/api/learners/{learner['id']}/diagnostic/generate")

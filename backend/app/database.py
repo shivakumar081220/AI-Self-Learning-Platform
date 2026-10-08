@@ -48,6 +48,12 @@ def ensure_legacy_columns() -> None:
                 connection.exec_driver_sql(
                     "ALTER TABLE topics ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1"
                 )
+            if "learning_objectives_json" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE topics ADD COLUMN learning_objectives_json JSON NOT NULL DEFAULT '[]'"
+                )
+            if "estimated_minutes" not in columns:
+                connection.exec_driver_sql("ALTER TABLE topics ADD COLUMN estimated_minutes INTEGER")
         if "generated_courses" in tables:
             columns = {
                 row[1]
@@ -68,6 +74,37 @@ def ensure_legacy_columns() -> None:
             if "target_outcome" not in columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE generated_courses ADD COLUMN target_outcome TEXT"
+                )
+            if "learning_objectives_json" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE generated_courses ADD COLUMN learning_objectives_json JSON NOT NULL DEFAULT '[]'"
+                )
+            for index in connection.exec_driver_sql(
+                "PRAGMA index_list('generated_courses')"
+            ).fetchall():
+                if not index[2]:
+                    continue
+                index_name = index[1].replace('"', '""')
+                index_columns = [
+                    row[2]
+                    for row in connection.exec_driver_sql(
+                        f'PRAGMA index_info("{index_name}")'
+                    ).fetchall()
+                ]
+                if index_columns == ["learner_id"]:
+                    connection.exec_driver_sql(f'DROP INDEX "{index_name}"')
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_generated_courses_learner_id "
+                "ON generated_courses (learner_id)"
+            )
+        if "learning_paths" in tables:
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(learning_paths)").fetchall()
+            }
+            if "course_id" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE learning_paths ADD COLUMN course_id INTEGER"
                 )
         if "assessments" in tables:
             columns = {

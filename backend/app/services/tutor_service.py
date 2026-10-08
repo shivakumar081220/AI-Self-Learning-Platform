@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -5,8 +6,12 @@ from pydantic import BaseModel, Field, ValidationError
 from ..config import settings
 from ..models import Learner, Topic
 from ..schemas import CodingExample
+from ..topic_titles import display_topic_title
 from ..track_catalog import TRACK_BY_ID
-from .ai_provider import request_structured_json
+from .ai_provider import AIProviderError, log_ai_fallback, request_structured_json
+
+
+logger = logging.getLogger(__name__)
 
 
 class TutorAnswer(BaseModel):
@@ -33,7 +38,11 @@ def module_matches_question(question: str, course_topics: list[str]) -> bool:
 
 
 def _coding_example(track_id: str, topic: Topic | None) -> CodingExample:
-    title = topic.title if topic else TRACK_BY_ID.get(track_id, TRACK_BY_ID["generative_ai"]).name
+    title = (
+        display_topic_title(topic.title)
+        if topic
+        else TRACK_BY_ID.get(track_id, TRACK_BY_ID["generative_ai"]).name
+    )
     examples = {
         "python_for_ai": (
             "Normalize a numeric feature",
@@ -123,17 +132,18 @@ def _fallback_answer(
     completed_topics: list[str] | None = None,
     recent_assessments: list[dict[str, Any]] | None = None,
 ) -> TutorAnswer:
-    track_name = TRACK_BY_ID.get(learner.track, TRACK_BY_ID["generative_ai"]).name
-    current_title = topic.title if topic else "your current topic"
+    track_id = topic.course.track_id if topic and topic.course else learner.track
+    track_name = TRACK_BY_ID.get(track_id, TRACK_BY_ID["generative_ai"]).name
+    current_title = display_topic_title(topic.title) if topic else "your current topic"
     asks_for_module = any(term in question.lower() for term in ("course", "module", "lesson"))
     if asks_for_module and course_title and not module_matches_question(question, course_topics):
         return TutorAnswer(
             answer=f"I don't see a matching module for that request in {course_title}, so I won't invent one. I can connect it to {current_title} instead.",
             simple_explanation=f"That subject is not currently covered in your {track_name} learning path.",
             example=f"Use one idea from {current_title} to examine a small example related to your goal: {learner.goal_text}.",
-            coding_example=_coding_example(learner.track, topic),
+            coding_example=_coding_example(track_id, topic),
             key_points=[f"Your selected track is {track_name}.", "No matching module was found in the active course."],
-            related_topic=topic.title if topic else None,
+            related_topic=display_topic_title(topic.title) if topic else None,
             suggested_next_action=f"Continue with {current_title} or switch tracks from your profile.",
             follow_up="Would you like to connect the question to the current topic?",
         )
@@ -145,15 +155,22 @@ def _fallback_answer(
     example = f"For '{question.strip()}', apply {concept} to a small example related to {learner.goal_text}, then check the result."
     points = [f"The active track is {track_name}.", f"The current topic is {current_title}."]
     simple = f"In simple terms, {concept} helps you make progress toward {learner.goal_text}."
-    related_topic = next((title for title in course_topics if topic is None or title != topic.title), None)
+    related_topic = next(
+        (
+            title
+            for title in course_topics
+            if topic is None or title != display_topic_title(topic.title)
+        ),
+        None,
+    )
 
     lowered = " ".join(str(item).lower() for item in (topic.concept_tags if topic else []))
-    if learner.track == "ai_agents" or "agent" in lowered or "tool" in question.lower():
+    if track_id == "ai_agents" or "agent" in lowered or "tool" in question.lower():
         answer = "An agent should use a tool when it needs information or an action that text generation alone cannot provide. The application validates the tool and its arguments before execution."
         simple = "The model may suggest a tool, but application code decides whether that tool is allowed."
         example = "A support agent searches approved policy documents, then cites a retrieved passage in its answer."
         points = ["Tools add specific capabilities.", "Application code validates tool names and arguments."]
-    elif learner.track in {"rag", "nlp", "llms"} or any(term in lowered for term in ("embedding", "retriev", "grounding", "token")):
+    elif track_id in {"rag", "nlp", "llms"} or any(term in lowered for term in ("embedding", "retriev", "grounding", "token")):
         answer = "Retrieval and language representations help select relevant evidence before a model writes an answer."
         simple = "Find useful source text first; then ask the model to explain it without making up missing facts."
         example = "A document assistant retrieves the policy paragraph most relevant to a question before generating a cited answer."
@@ -163,7 +180,7 @@ def _fallback_answer(
         answer=answer,
         simple_explanation=simple,
         example=example,
-        coding_example=_coding_example(learner.track, topic),
+        coding_example=_coding_example(track_id, topic),
         key_points=points,
         related_topic=related_topic,
         suggested_next_action=next_action,
@@ -181,10 +198,11 @@ def _openrouter_answer(
     completed_topics: list[str],
     recent_assessments: list[dict[str, Any]],
 ) -> TutorAnswer:
-    track = TRACK_BY_ID.get(learner.track, TRACK_BY_ID["generative_ai"])
+    track_id = topic.course.track_id if topic and topic.course else learner.track
+    track = TRACK_BY_ID.get(track_id, TRACK_BY_ID["generative_ai"])
     context = {
         "learner": {
-            "track_id": learner.track,
+            "track_id": track_id,
             "track_name": track.name,
             "experience_level": learner.experience_level,
             "goal": learner.goal_text,
@@ -194,21 +212,26 @@ def _openrouter_answer(
             "recent_assessments": recent_assessments,
         },
         "topic": (
-            {"title": topic.title, "description": topic.description, "concepts": topic.concept_tags}
+            {
+                "title": display_topic_title(topic.title),
+                "description": topic.description,
+                "concepts": topic.concept_tags,
+            }
             if topic
             else None
         ),
         "course": {"title": course_title, "allowed_module_titles": course_topics},
         "learner_question": question,
-        "schema": TutorAnswer.model_json_schema(),
     }
-    user_payload = {"context": context, "schema": TutorAnswer.model_json_schema()}
+    user_payload = {"context": context}
     answer = request_structured_json(
+        operation="tutor_response",
         system_prompt=(
             "You are a patient AI tutor. Use the learner's selected track, goal, level, current topic, weak concepts, completed topics, and recent assessment results. "
             "Explain simply and concisely, include one example, key points, and a safe track-relevant coding example. "
             "If the question is unrelated to the goal, say so and redirect. Never invent courses or module titles or IDs. "
-            "Set related_topic only to an exact title from allowed_module_titles, otherwise null."
+            "Set related_topic only to an exact title from allowed_module_titles, otherwise null. "
+            "Return only the exact schema fields with their declared JSON types and no additional fields."
         ),
         user_payload=user_payload,
         response_model=TutorAnswer,
@@ -231,6 +254,7 @@ def answer_tutor_question(
     recent_assessments: list[dict[str, Any]] | None = None,
 ) -> tuple[TutorAnswer, str]:
     course_topics = course_topics or []
+    course_topics = [display_topic_title(title) for title in course_topics]
     completed_topics = completed_topics or []
     recent_assessments = recent_assessments or []
     if settings.openrouter_api_key:
@@ -242,8 +266,14 @@ def answer_tutor_question(
                 ),
                 "openrouter",
             )
-        except (Exception, ValidationError):
-            pass
+        except (AIProviderError, ValidationError, ValueError) as error:
+            logger.warning(
+                "AI operation used deterministic fallback; operation=tutor_response reason=%s",
+                type(error).__name__,
+            )
+            log_ai_fallback("tutor_response", type(error).__name__)
+    else:
+        log_ai_fallback("tutor_response", "provider_not_configured")
     return (
         _fallback_answer(
             learner, topic, question, weak_concepts, course_title,

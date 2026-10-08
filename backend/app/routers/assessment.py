@@ -18,6 +18,7 @@ from ..services.assessment_result_service import apply_assessment_result, classi
 from ..services.assessment_service import generate_assessment_questions
 from ..models import User
 from ..security import ensure_learner_access, get_optional_user
+from ..topic_titles import display_topic_title
 
 
 router = APIRouter(prefix="/api/learners/{learner_id}", tags=["assessment"])
@@ -35,7 +36,10 @@ def _get_assessment_context(
         raise HTTPException(status_code=404, detail="Topic not found in curated catalog")
     path = database.scalar(
         select(LearningPath)
-        .where(LearningPath.learner_id == learner_id)
+        .where(
+            LearningPath.learner_id == learner_id,
+            LearningPath.course_id == topic.course_id,
+        )
         .order_by(LearningPath.created_at.desc())
     )
     if not path or topic_id not in {item.get("topic_id") for item in path.path_json}:
@@ -62,7 +66,7 @@ def _public_response(
         assessment_id=assessment.id,
         learner_id=assessment.learner_id,
         topic_id=topic.id,
-        topic_title=topic.title,
+        topic_title=display_topic_title(topic.title),
         status="submitted" if assessment.completed_at else "pending",
         questions=[
             AssessmentQuestionPublic(
@@ -129,7 +133,10 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
             strong.append(concept)
     path = database.scalar(
         select(LearningPath)
-        .where(LearningPath.learner_id == assessment.learner_id)
+        .where(
+            LearningPath.learner_id == assessment.learner_id,
+            LearningPath.course_id == topic.course_id,
+        )
         .order_by(LearningPath.created_at.desc())
     )
     path_topic_ids = [item.get("topic_id") for item in path.path_json if item.get("topic_id")] if path else []
@@ -159,8 +166,9 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
     return AssessmentResultResponse(
         assessment_id=assessment.id,
         learner_id=assessment.learner_id,
+        course_id=topic.course_id,
         topic_id=topic.id,
-        topic_title=topic.title,
+        topic_title=display_topic_title(topic.title),
         score=round((assessment.score or 0) * len(assessment.questions_json)),
         percentage=round((assessment.score or 0) * 100, 1),
         correct_count=round((assessment.score or 0) * len(assessment.questions_json)),
@@ -171,7 +179,9 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
         recommendation=RecommendationResponse(
             action_type=action_type,
             target_topic_id=recommendation.topic_id if recommendation else None,
-            target_topic_title=target_topic.title if target_topic else None,
+            target_topic_title=(
+                display_topic_title(target_topic.title) if target_topic else None
+            ),
             summary=summary,
             next_action=next_action,
             remediation=(
@@ -183,6 +193,13 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
             ),
             practice_suggestion=stored_remediation.get("practice_suggestion") if stored_remediation else None,
             remediation_source=stored_remediation.get("source") if stored_remediation else None,
+            alternative_explanation=(
+                stored_remediation.get("alternative_explanation") if stored_remediation else None
+            ),
+            example=stored_remediation.get("example") if stored_remediation else None,
+            remediation_next_action=(
+                stored_remediation.get("next_action") if stored_remediation else None
+            ),
         ),
         question_review=_build_question_review(assessment),
     )
@@ -210,6 +227,22 @@ def generate_topic_assessment(
             status_code=400,
             detail="Complete the learning activity before starting its assessment",
         )
+    pending_assessment = database.scalar(
+        select(Assessment)
+        .where(
+            Assessment.learner_id == learner_id,
+            Assessment.topic_id == topic_id,
+            Assessment.assessment_type == "topic",
+            Assessment.completed_at.is_(None),
+        )
+        .order_by(Assessment.created_at.desc())
+    )
+    if pending_assessment:
+        source = (pending_assessment.feedback_json or {}).get(
+            "generation_source", "curated_fallback"
+        )
+        return _public_response(pending_assessment, topic, source)
+
     weak_concepts = [
         skill.concept
         for skill in database.scalars(
@@ -225,13 +258,14 @@ def generate_topic_assessment(
         for question in previous.questions_json
     ]
     question_set, source = generate_assessment_questions(
-        topic, learner, weak_concepts, previous_questions
+        database, topic, learner, weak_concepts, previous_questions
     )
     assessment = Assessment(
         learner_id=learner_id,
         topic_id=topic_id,
         assessment_type="topic",
         questions_json=[question.model_dump() for question in question_set.questions],
+        feedback_json={"generation_source": source},
     )
     database.add(assessment)
     database.commit()
@@ -262,7 +296,8 @@ def get_assessment(
         raise HTTPException(status_code=500, detail="Assessment topic is unavailable")
     if assessment.completed_at:
         return _persisted_result(assessment, topic, database)
-    return _public_response(assessment, topic, "curated_fallback")
+    source = (assessment.feedback_json or {}).get("generation_source", "curated_fallback")
+    return _public_response(assessment, topic, source)
 
 
 @router.post("/assessments/{assessment_id}/submit", response_model=AssessmentResultResponse)

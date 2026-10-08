@@ -1,14 +1,78 @@
+import logging
 from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Assessment, GeneratedCourse, Learner, SkillScore, Topic, TopicPrerequisite, TopicProgress, Weakness
 from ..schemas import CurriculumTopic, GeneratedCurriculum
+from ..topic_titles import display_topic_title
 from ..track_catalog import TRACK_BY_ID
-from .ai_provider import request_structured_json
+from .ai_provider import AIProviderError, log_ai_fallback, request_structured_json
+
+
+logger = logging.getLogger(__name__)
+
+_FALLBACK_TRACK_CONCEPTS = {
+    "python_for_ai": [
+        ("python_syntax", "variables_and_types"),
+        ("functions", "control_flow"),
+        ("data_structures", "data_cleaning"),
+        ("numerical_computing", "feature_preparation"),
+        ("reproducible_scripts", "dataset_pipelines"),
+    ],
+    "machine_learning": [
+        ("training_data", "feature_engineering"),
+        ("supervised_learning", "classification"),
+        ("loss_functions", "model_optimization"),
+        ("validation_sets", "overfitting"),
+        ("evaluation_metrics", "error_analysis"),
+    ],
+    "deep_learning": [
+        ("tensors", "neural_network_layers"),
+        ("forward_pass", "activation_functions"),
+        ("backpropagation", "gradient_descent"),
+        ("regularization", "generalization"),
+        ("training_loops", "model_evaluation"),
+    ],
+    "nlp": [
+        ("text_normalization", "tokenization"),
+        ("bag_of_words", "tf_idf"),
+        ("text_classification", "sequence_labeling"),
+        ("word_embeddings", "language_models"),
+        ("precision_recall", "nlp_evaluation"),
+    ],
+    "generative_ai": [
+        ("prompt_design", "context"),
+        ("constraints", "structured_outputs"),
+        ("generation_parameters", "sampling"),
+        ("grounding", "guardrails"),
+        ("quality_metrics", "safety_evaluation"),
+    ],
+    "llms": [
+        ("tokens", "context_windows"),
+        ("transformers", "attention"),
+        ("inference", "decoding"),
+        ("structured_generation", "tool_calling"),
+        ("latency", "model_evaluation"),
+    ],
+    "rag": [
+        ("document_chunking", "metadata"),
+        ("embeddings", "vector_search"),
+        ("retrieval_ranking", "hybrid_search"),
+        ("grounded_generation", "citations"),
+        ("retrieval_metrics", "answer_faithfulness"),
+    ],
+    "ai_agents": [
+        ("tool_schemas", "argument_validation"),
+        ("task_decomposition", "planning"),
+        ("state_management", "orchestration"),
+        ("permissions", "guardrails"),
+        ("trajectory_evaluation", "agent_reliability"),
+    ],
+}
 
 
 def _fallback_curriculum(learner: Learner) -> GeneratedCurriculum:
@@ -23,14 +87,17 @@ def _fallback_curriculum(learner: Learner) -> GeneratedCurriculum:
     ]
     topics = []
     for index, title in enumerate(titles):
-        concept = track.id if index < 2 else title.lower().replace(" ", "_")
+        concepts = _FALLBACK_TRACK_CONCEPTS[track.id][index]
         topics.append(
             CurriculumTopic(
                 title=title,
                 description=f"A focused {learner.experience_level}-level lesson in {title.lower()} for the goal: {goal}.",
-                learning_objectives=[f"Explain the core ideas in {title.lower()}", "Apply the idea in a Generative AI workflow"],
+                learning_objectives=[
+                    f"Explain {concepts[0].replace('_', ' ')} and {concepts[1].replace('_', ' ')}",
+                    f"Apply these concepts to {track.name} tasks related to the learner's goal",
+                ],
                 difficulty=("beginner" if index < 2 else learner.experience_level),
-                concepts=[concept],
+                concepts=list(concepts),
                 prerequisites=[titles[index - 1]] if index else [],
                 estimated_minutes=30 + index * 10,
             )
@@ -42,6 +109,11 @@ def _fallback_curriculum(learner: Learner) -> GeneratedCurriculum:
         goal=goal,
         level=learner.experience_level,
         estimated_duration=f"{len(topics) * 40} minutes",
+        learning_objectives=[
+            track.learning_objective,
+            "Apply the concepts to the learner's stated goal",
+            f"Evaluate {track.name} workflows using relevant quality checks",
+        ],
         topics=topics,
     )
 
@@ -78,18 +150,27 @@ def _openrouter_curriculum(learner: Learner, database: Session) -> GeneratedCurr
     existing_course = database.scalar(
         select(GeneratedCourse).where(GeneratedCourse.learner_id == learner.id)
     )
-    topic_catalog = database.scalars(
+    global_topics = database.scalars(
+        select(Topic).where(Topic.owner_user_id.is_(None))
+    ).all()
+    relevant_global_topics = [
+        topic
+        for topic in global_topics
+        if topic.goal_relevance.get(learner.track, 0) > 0
+    ]
+    if not relevant_global_topics:
+        relevant_global_topics = global_topics
+    owned_topics = database.scalars(
         select(Topic).where(
-            or_(
-                Topic.owner_user_id.is_(None),
-                and_(
-                    Topic.owner_user_id == learner.user_id,
-                    Topic.track_id == learner.track,
-                    Topic.is_active.is_(True),
-                ),
-            )
+            Topic.owner_user_id == learner.user_id,
+            Topic.track_id == learner.track,
+            Topic.is_active.is_(True),
         )
     ).all()
+    topic_catalog = [
+        *relevant_global_topics,
+        *owned_topics,
+    ]
     topic_ids = [topic.id for topic in topic_catalog]
     prerequisite_edges = database.scalars(
         select(TopicPrerequisite).where(TopicPrerequisite.topic_id.in_(topic_ids))
@@ -132,19 +213,22 @@ def _openrouter_curriculum(learner: Learner, database: Session) -> GeneratedCurr
             for topic in topic_catalog
         ],
         "requirements": "Generate 4 to 8 original modules for the selected track, prerequisites by title, and a coherent level-appropriate progression. The track prerequisites are guidance, not mandatory modules when diagnostic skills show mastery. Do not return database IDs.",
-        "schema": GeneratedCurriculum.model_json_schema(),
     }
     curriculum = request_structured_json(
+        operation="curriculum_generation",
         system_prompt=(
             "Generate a personalized AI learning curriculum for exactly the selected track_id and track_name. "
             "Use the learner's goal, target outcome, experience, skill gaps, prerequisite guidance, and recent assessment evidence. "
+            "Return course learning objectives as well as ordered topics. Each topic must include its objectives, "
+            "prerequisites by exact generated topic title, difficulty, and estimated_minutes. "
             "Do not force a prerequisite topic when the diagnostic shows mastery. Respect prerequisite ordering. "
-            "Return JSON matching the supplied schema; do not create database IDs."
+            "Return only the exact schema fields with their declared JSON types; include all required properties, "
+            "do not add unsupported properties, and do not create database IDs."
         ),
         user_payload=context,
         response_model=GeneratedCurriculum,
         temperature=0.4,
-        max_tokens=3000,
+        max_tokens=2400,
     )
     if (
         curriculum.goal != learner.goal_text
@@ -163,76 +247,49 @@ def generate_curriculum(
             if database is None:
                 raise ValueError("A database session is required for personalized curriculum generation")
             return _openrouter_curriculum(learner, database), "openrouter"
-        except (Exception, ValidationError):
-            pass
+        except (AIProviderError, ValidationError, ValueError) as error:
+            logger.warning(
+                "AI operation used deterministic fallback; operation=curriculum_generation reason=%s",
+                type(error).__name__,
+            )
+    log_ai_fallback(
+        "curriculum_generation",
+        "provider_not_configured" if not settings.openrouter_api_key else "generation_failed",
+    )
     return _fallback_curriculum(learner), "deterministic_fallback"
 
 
 def persist_curriculum(database: Session, learner: Learner, user_id: int) -> tuple[GeneratedCourse, str]:
-    existing = database.scalar(select(GeneratedCourse).where(GeneratedCourse.learner_id == learner.id))
-    if (
-        existing
-        and existing.track_id == learner.track
-        and existing.goal == learner.goal_text
-        and existing.target_outcome == learner.target_outcome
-    ):
+    existing = database.scalar(
+        select(GeneratedCourse).where(
+            GeneratedCourse.learner_id == learner.id,
+            GeneratedCourse.track_id == learner.track,
+            GeneratedCourse.goal == learner.goal_text,
+            GeneratedCourse.level == learner.experience_level,
+            GeneratedCourse.target_outcome == learner.target_outcome,
+        )
+    )
+    if existing:
         return existing, "persisted"
     curriculum, source = generate_curriculum(learner, database)
-    if existing:
-        archived_topics = database.scalars(
-            select(Topic).where(Topic.course_id == existing.id, Topic.is_active.is_(True))
-        ).all()
-        existing.track_history_json = [
-            *(existing.track_history_json or []),
-            {
-                "track_id": existing.track_id,
-                "course_title": existing.title,
-                "goal": existing.goal,
-                "target_outcome": existing.target_outcome,
-                "generation_source": existing.generation_source,
-                "topics": [
-                    {
-                        "topic_id": topic.id,
-                        "title": topic.title,
-                        "description": topic.description,
-                        "difficulty": topic.difficulty,
-                        "concepts": topic.concept_tags,
-                    }
-                    for topic in archived_topics
-                ],
-            },
-        ]
-        database.execute(
-            update(Topic)
-            .where(Topic.course_id == existing.id, Topic.is_active.is_(True))
-            .values(is_active=False)
-        )
-        course = existing
-    else:
-        course = GeneratedCourse(
-            user_id=user_id,
-            learner_id=learner.id,
-            title=curriculum.course_title,
-            description=curriculum.description,
-            goal=curriculum.goal,
-            target_outcome=learner.target_outcome,
-            level=curriculum.level,
-            estimated_duration=curriculum.estimated_duration,
-            track_id=curriculum.track_id,
-            generation_source=source,
-        )
-        database.add(course)
-        database.flush()
-    course.title = curriculum.course_title
-    course.description = curriculum.description
-    course.goal = curriculum.goal
-    course.target_outcome = learner.target_outcome
-    course.level = curriculum.level
-    course.estimated_duration = curriculum.estimated_duration
-    course.track_id = curriculum.track_id
-    course.generation_source = source
+    course = GeneratedCourse(
+        user_id=user_id,
+        learner_id=learner.id,
+        title=curriculum.course_title,
+        description=curriculum.description,
+        goal=curriculum.goal,
+        target_outcome=learner.target_outcome,
+        level=curriculum.level,
+        estimated_duration=curriculum.estimated_duration,
+        learning_objectives_json=curriculum.learning_objectives,
+        track_id=curriculum.track_id,
+        generation_source=source,
+    )
+    database.add(course)
     database.flush()
-    generation_index = (database.scalar(select(func.count(Topic.id)).where(Topic.course_id == course.id)) or 0) + 1
+    generation_index = (
+        database.scalar(select(func.count(Topic.id)).where(Topic.course_id == course.id)) or 0
+    ) + 1
     topic_ids: dict[str, str] = {}
     for topic in curriculum.topics:
         topic_id = f"generated-{uuid4().hex}"
@@ -240,10 +297,13 @@ def persist_curriculum(database: Session, learner: Learner, user_id: int) -> tup
         database.add(
             Topic(
                 id=topic_id,
-                title=f"{topic.title} · {course.id}-{generation_index}",
+                # Topic titles are globally unique; this internal suffix is removed from responses.
+                title=f"{display_topic_title(topic.title)} · {course.id}-{generation_index}",
                 description=topic.description,
                 difficulty=topic.difficulty,
                 concept_tags=topic.concepts,
+                learning_objectives_json=topic.learning_objectives,
+                estimated_minutes=topic.estimated_minutes,
                 goal_relevance={"generated": 1.0},
                 content_source="AI-generated learner curriculum",
                 track_id=curriculum.track_id,

@@ -66,7 +66,7 @@ export function createLearner(profile) {
 }
 
 export function generateDiagnostic(learnerId) {
-  return request(`/learners/${learnerId}/diagnostic/generate`, { method: "POST" });
+  return request(`/learners/${learnerId}/diagnostic`, { method: "POST" });
 }
 
 export function submitDiagnostic(learnerId, assessmentId, answers) {
@@ -88,16 +88,19 @@ export function getLearnerSummary(learnerId) {
   return request(`/learners/${learnerId}/summary`);
 }
 
-export function getLearningPath(learnerId) {
-  return request(`/learners/${learnerId}/learning-path`);
+export function getLearningPath(learnerId, courseId = null) {
+  const courseQuery = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
+  return request(`/learners/${learnerId}/learning-path${courseQuery}`);
 }
 
-export function regenerateLearningPath(learnerId) {
-  return request(`/learners/${learnerId}/learning-path/regenerate`, { method: "POST" });
+export function regenerateLearningPath(learnerId, courseId = null) {
+  const courseQuery = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
+  return request(`/learners/${learnerId}/learning-path/regenerate${courseQuery}`, { method: "POST" });
 }
 
-export function getCurrentTopic(learnerId) {
-  return request(`/learners/${learnerId}/learning-path/current`);
+export function getCurrentTopic(learnerId, courseId = null) {
+  const courseQuery = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
+  return request(`/learners/${learnerId}/learning-path/current${courseQuery}`);
 }
 
 export function getLearningContent(learnerId, topicId) {

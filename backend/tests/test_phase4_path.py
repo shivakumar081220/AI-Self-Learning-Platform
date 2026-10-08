@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -116,6 +117,69 @@ def test_weak_concept_is_prioritized_with_goal_relevance(database: Session):
     assert rag_item["relevance_score"] == 1.0
 
 
+def test_validated_ai_diagnostic_focus_is_used_without_weakening_path_constraints(
+    database: Session,
+):
+    learner = add_learner(database, "Build a RAG application")
+    assessment = Assessment(
+        learner_id=learner.id,
+        assessment_type="diagnostic",
+        completed_at=datetime.utcnow(),
+        feedback_json={
+            "ai_interpretation": {
+                "summary": "Focus on retrieval concepts.",
+                "focus_concepts": ["retrieval"],
+                "knowledge_level": "developing",
+                "knowledge_assessment": "Retrieval needs more practice.",
+                "source": "openrouter",
+            }
+        },
+    )
+    database.add(assessment)
+    database.commit()
+
+    path = generate_path_plan(database, learner)
+    retrieval_topic = next(
+        item for item in path["topics"] if item["topic_id"] == "retrieval-augmented-generation"
+    )
+    positions = {item["topic_id"]: index for index, item in enumerate(path["topics"])}
+
+    assert "AI diagnostic analysis recommends focusing on: retrieval" in retrieval_topic["reason"]
+    assert "validated OpenRouter diagnostic analysis" in path["overall_rationale"]
+    assert positions["tokenization-embeddings"] < positions["retrieval-augmented-generation"]
+
+
+def test_deterministic_diagnostic_interpretation_is_not_reported_as_ai_path_focus(
+    database: Session,
+):
+    learner = add_learner(database, "Build a RAG application")
+    database.add(
+        Assessment(
+            learner_id=learner.id,
+            assessment_type="diagnostic",
+            completed_at=datetime.utcnow(),
+            feedback_json={
+                "ai_interpretation": {
+                    "summary": "Focus on retrieval concepts.",
+                    "focus_concepts": ["retrieval"],
+                    "knowledge_level": "developing",
+                    "knowledge_assessment": "Retrieval needs more practice.",
+                    "source": "deterministic_fallback",
+                }
+            },
+        )
+    )
+    database.commit()
+
+    path = generate_path_plan(database, learner)
+    retrieval_topic = next(
+        item for item in path["topics"] if item["topic_id"] == "retrieval-augmented-generation"
+    )
+
+    assert "AI diagnostic analysis" not in retrieval_topic["reason"]
+    assert "validated OpenRouter diagnostic analysis" not in path["overall_rationale"]
+
+
 def test_completed_topics_are_retained_as_history_and_not_recommended_again(database: Session):
     learner = add_learner(database, "Build a RAG application")
     complete_topics(database, learner.id, ["ai-foundations"])
@@ -189,7 +253,7 @@ def test_learning_path_api_persists_and_regenerates(client: TestClient):
     assert fetched.status_code == 200
     assert fetched.json()["path_id"] == generated_body["path_id"]
     assert regenerated.status_code == 200
-    assert regenerated.json()["path_id"] != generated_body["path_id"]
+    assert regenerated.json()["path_id"] == generated_body["path_id"]
     assert regenerated.json()["current_topic_id"] == generated_body["current_topic_id"]
 
 

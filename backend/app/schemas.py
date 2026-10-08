@@ -106,6 +106,7 @@ class GeneratedCurriculum(BaseModel):
     goal: str = Field(min_length=3, max_length=240)
     level: ExperienceLevel
     estimated_duration: str = Field(min_length=3, max_length=80)
+    learning_objectives: list[str] = Field(min_length=3, max_length=8)
     topics: list[CurriculumTopic] = Field(min_length=3, max_length=12)
 
     @model_validator(mode="after")
@@ -115,6 +116,8 @@ class GeneratedCurriculum(BaseModel):
             raise ValueError("Curriculum topic titles must be unique")
         if any(prerequisite not in titles for topic in self.topics for prerequisite in topic.prerequisites):
             raise ValueError("Curriculum prerequisites must reference generated topics")
+        if len({concept for topic in self.topics for concept in topic.concepts}) < 3:
+            raise ValueError("Curriculum must define at least three distinct concepts")
         return self
 
 
@@ -127,6 +130,7 @@ class CurriculumResponse(BaseModel):
     goal: str
     level: ExperienceLevel
     estimated_duration: str
+    learning_objectives: list[str] = Field(default_factory=list)
     topics: list[dict]
     track_history: list[dict] = Field(default_factory=list)
     courses: list[dict] = Field(default_factory=list)
@@ -135,11 +139,14 @@ class CurriculumResponse(BaseModel):
 
 
 class DiagnosticQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(min_length=2, max_length=80)
     question: str = Field(min_length=10, max_length=600)
     options: list[str] = Field(min_length=3, max_length=5)
     correct_option: int = Field(ge=0)
     concept: str = Field(min_length=2, max_length=100)
+    difficulty: ExperienceLevel
     explanation: str = Field(min_length=5, max_length=500)
 
     @model_validator(mode="after")
@@ -150,7 +157,9 @@ class DiagnosticQuestion(BaseModel):
 
 
 class DiagnosticQuestionSet(BaseModel):
-    questions: list[DiagnosticQuestion] = Field(min_length=6, max_length=12)
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[DiagnosticQuestion] = Field(min_length=8, max_length=8)
 
     @model_validator(mode="after")
     def validate_question_set(self) -> "DiagnosticQuestionSet":
@@ -167,12 +176,14 @@ class DiagnosticQuestionPublic(BaseModel):
     id: str
     question: str
     options: list[str]
+    concept: str
+    difficulty: ExperienceLevel
 
 
 class DiagnosticGenerateResponse(BaseModel):
     assessment_id: int
     questions: list[DiagnosticQuestionPublic]
-    generated_by: Literal["openrouter", "curated_fallback"]
+    generated_by: Literal["openrouter", "cache", "curated_fallback"]
 
 
 class AnswerSubmission(BaseModel):
@@ -211,6 +222,8 @@ class SkillInterpretationResponse(BaseModel):
 
 
 class CodingExample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(min_length=3, max_length=140)
     code: str = Field(min_length=8, max_length=5000)
     explanation: str = Field(min_length=10, max_length=1200)
@@ -274,6 +287,7 @@ class LearningPathTopic(BaseModel):
 class LearningPathResponse(BaseModel):
     path_id: int
     learner_id: int
+    course_id: int | None = None
     goal: str
     current_index: int
     current_topic_id: str | None
@@ -286,6 +300,8 @@ class CurrentTopicResponse(BaseModel):
     learner_id: int
     topic_id: str
     title: str
+    course_id: int | None = None
+    course_title: str | None = None
     difficulty: str
     position: int
     total_topics: int
@@ -294,6 +310,8 @@ class CurrentTopicResponse(BaseModel):
 
 
 class LearningContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     topic_id: str = Field(min_length=2, max_length=80)
     topic_title: str = Field(min_length=2, max_length=160)
     overview: str = Field(min_length=20, max_length=800)
@@ -316,11 +334,13 @@ class LearningContent(BaseModel):
 class LearningContentResponse(BaseModel):
     learner_id: int
     content: LearningContent
-    source: Literal["openrouter", "curated_fallback"]
+    source: Literal["openrouter", "cache", "curated_fallback"]
     topic_status: Literal["in_progress", "completed", "pending", "remediation"]
 
 
 class AssessmentQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question_id: str = Field(min_length=2, max_length=80)
     question: str = Field(min_length=10, max_length=700)
     options: list[str] = Field(min_length=3, max_length=5)
@@ -337,6 +357,8 @@ class AssessmentQuestion(BaseModel):
 
 
 class AssessmentQuestionSet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     questions: list[AssessmentQuestion] = Field(min_length=3, max_length=8)
 
     @model_validator(mode="after")
@@ -362,7 +384,7 @@ class AssessmentGenerateResponse(BaseModel):
     topic_title: str
     status: Literal["pending", "submitted"]
     questions: list[AssessmentQuestionPublic]
-    source: Literal["openrouter", "curated_fallback"]
+    source: Literal["openrouter", "cache", "curated_fallback"]
 
 
 class AssessmentAnswer(BaseModel):
@@ -392,11 +414,15 @@ class RecommendationResponse(BaseModel):
     remediation: str | None
     practice_suggestion: str | None = None
     remediation_source: Literal["openrouter", "deterministic_fallback", "persisted"] | None = None
+    alternative_explanation: str | None = None
+    example: str | None = None
+    remediation_next_action: str | None = None
 
 
 class AssessmentResultResponse(BaseModel):
     assessment_id: int
     learner_id: int
+    course_id: int | None = None
     topic_id: str
     topic_title: str
     score: int

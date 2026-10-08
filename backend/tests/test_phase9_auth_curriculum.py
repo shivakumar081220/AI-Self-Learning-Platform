@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.models import GeneratedCourse, Learner, TopicProgress
+from app.models import GeneratedCourse, Learner, LearningPath, Topic, TopicProgress
 from app.seed_topics import seed_topics
-from app.services import curriculum_service
+from app.services import content_service, curriculum_service
+from app.topic_titles import display_topic_title
+from app.track_catalog import AI_TRACKS
 
 
 @pytest.fixture
@@ -74,6 +76,10 @@ def test_two_users_receive_different_persisted_curricula_and_isolated_data(clien
     course_b = client.get("/api/curriculum/current", headers=headers_b).json()
     assert course_a["course_id"] != course_b["course_id"]
     assert course_a["course_title"] != course_b["course_title"]
+    assert course_a["learning_objectives"] and course_b["learning_objectives"]
+    assert all(topic["learning_objectives"] for topic in course_a["topics"])
+    assert all(topic["estimated_minutes"] for topic in course_a["topics"])
+    assert all("prerequisites" in topic for topic in course_a["topics"])
     assert client.get(f"/api/learners/{learner_b['id']}/summary", headers=headers_a).status_code == 403
     assert client.get(f"/api/learners/{learner_a['id']}/summary", headers=headers_b).status_code == 403
     assert client.get(f"/api/learners/{learner_b['id']}", headers=headers_a).status_code == 403
@@ -104,6 +110,163 @@ def test_generated_curriculum_is_persisted_and_path_uses_generated_topics(client
     body = path.json()
     assert body["topics"]
     assert all(item["topic_id"].startswith("generated-") for item in body["topics"])
+    assert all("·" not in item["title"] for item in body["topics"])
+    current = client.get(
+        f"/api/learners/{learner['id']}/learning-path/current", headers=headers
+    ).json()
+    assert current["course_title"] == first["course_title"]
+    assert current["title"] == next(
+        item["title"] for item in first["topics"] if item["topic_id"] == current["topic_id"]
+    )
+
+
+def test_legacy_generated_title_marker_is_hidden_from_course_and_path_responses(
+    client: TestClient,
+):
+    _, headers = register(client, "Legacy Title", "legacy-title@example.com")
+    learner = onboard(client, headers, "rag", "Legacy Title")
+    curriculum = client.get("/api/curriculum/current", headers=headers).json()
+    path = client.post(
+        f"/api/learners/{learner['id']}/learning-path/generate", headers=headers
+    ).json()
+    current_topic_id = path["current_topic_id"]
+
+    with Session(app.state.phase9_engine) as database:
+        topic = database.get(Topic, current_topic_id)
+        topic.title = f"{display_topic_title(topic.title)} · {curriculum['course_id']}-1"
+        expected_title = display_topic_title(topic.title)
+        saved_path = database.scalar(
+            select(LearningPath).where(LearningPath.learner_id == learner["id"])
+        )
+        saved_path.path_json = [
+            {**item, "title": topic.title if item["topic_id"] == current_topic_id else item["title"]}
+            for item in saved_path.path_json
+        ]
+        database.commit()
+
+    current = client.get(
+        f"/api/learners/{learner['id']}/learning-path/current", headers=headers
+    ).json()
+    refreshed_curriculum = client.get("/api/curriculum/current", headers=headers).json()
+    refreshed_path = client.get(
+        f"/api/learners/{learner['id']}/learning-path", headers=headers
+    ).json()
+    summary = client.get(f"/api/learners/{learner['id']}/summary", headers=headers).json()
+    content = client.get(
+        f"/api/learners/{learner['id']}/topics/{current_topic_id}/content",
+        headers=headers,
+    ).json()
+
+    assert current["title"] == expected_title
+    assert current["course_title"] == curriculum["course_title"]
+    assert content["content"]["topic_title"] == expected_title
+    assert all(
+        display_topic_title(item["title"]) == item["title"]
+        for item in refreshed_curriculum["topics"]
+    )
+    assert all(
+        display_topic_title(item["title"]) == item["title"]
+        for item in refreshed_path["topics"]
+    )
+    assert summary["current_topic_title"] == expected_title
+
+
+def test_curriculum_is_regenerated_when_experience_level_changes(client: TestClient):
+    _, headers = register(client, "Level Change", "level-change@example.com")
+    initial_learner = client.post(
+        "/api/learners",
+        headers=headers,
+        json={
+            "name": "Level Change",
+            "experience_level": "beginner",
+            "goal_key": "llm_apps",
+            "target_outcome": "Build a validated LLM assistant",
+        },
+    )
+    assert initial_learner.status_code == 201
+    assert client.post("/api/curriculum/generate", headers=headers).status_code == 200
+    updated = client.post(
+        "/api/learners",
+        headers=headers,
+        json={
+            "name": "Level Change",
+            "experience_level": "intermediate",
+            "goal_key": "llm_apps",
+            "target_outcome": "Build a validated LLM assistant",
+        },
+    )
+    assert updated.status_code == 201
+
+    curriculum = client.post("/api/curriculum/generate", headers=headers)
+
+    assert curriculum.status_code == 200
+    assert curriculum.json()["level"] == "intermediate"
+    assert curriculum.json()["generation_source"] == "deterministic_fallback"
+    assert len(curriculum.json()["courses"]) == 2
+    assert {course["level"] for course in curriculum.json()["courses"]} == {
+        "beginner",
+        "intermediate",
+    }
+
+
+def test_each_enrolled_course_keeps_its_own_learning_path_and_progress(client: TestClient):
+    _, headers = register(client, "Multi Course", "multi-course@example.com")
+    learner = onboard(client, headers, "rag", "Multi Course")
+    first_course = client.get("/api/curriculum/current", headers=headers).json()
+    first_course_id = first_course["course_id"]
+    first_path = client.get(
+        f"/api/learners/{learner['id']}/learning-path?course_id={first_course_id}",
+        headers=headers,
+    ).json()
+    first_topic_id = first_path["current_topic_id"]
+
+    opened = client.get(
+        f"/api/learners/{learner['id']}/topics/{first_topic_id}/content",
+        headers=headers,
+    )
+    assert opened.status_code == 200
+    completed = client.post(
+        f"/api/learners/{learner['id']}/topics/{first_topic_id}/complete",
+        headers=headers,
+    )
+    assert completed.status_code == 200
+
+    updated_profile = client.post(
+        "/api/learners",
+        headers=headers,
+        json={
+            "name": "Multi Course",
+            "experience_level": "beginner",
+            "goal_key": "ai_agents",
+        },
+    )
+    assert updated_profile.status_code == 201
+    second_course_response = client.post("/api/curriculum/generate", headers=headers)
+    assert second_course_response.status_code == 200
+    courses = second_course_response.json()["courses"]
+    assert len(courses) == 2
+    second_course = next(
+        course for course in courses if course["course_id"] != first_course_id
+    )
+    second_path = client.get(
+        f"/api/learners/{learner['id']}/learning-path?course_id={second_course['course_id']}",
+        headers=headers,
+    ).json()
+    resumed_first_path = client.get(
+        f"/api/learners/{learner['id']}/learning-path?course_id={first_course_id}",
+        headers=headers,
+    ).json()
+
+    assert second_path["course_id"] == second_course["course_id"]
+    assert all(
+        item["topic_id"] in {topic["topic_id"] for topic in second_course["topics"]}
+        for item in second_path["topics"]
+    )
+    assert resumed_first_path["path_id"] == first_path["path_id"]
+    assert resumed_first_path["course_id"] == first_course_id
+    assert resumed_first_path["topics"][0]["topic_id"] == first_topic_id
+    assert resumed_first_path["topics"][0]["status"] == "completed"
+    assert all(item["status"] in {"current", "pending"} for item in second_path["topics"])
 
 
 def test_user_can_resume_progress_after_login_again(client: TestClient):
@@ -133,3 +296,45 @@ def test_mocked_ai_curriculum_structures_differ(monkeypatch):
     agent_curriculum = curriculum_service._fallback_curriculum(agents)
     assert rag_curriculum.course_title != agent_curriculum.course_title
     assert [topic.title for topic in rag_curriculum.topics] != [topic.title for topic in agent_curriculum.topics]
+
+
+def test_fallback_curricula_and_lessons_use_track_specific_concepts():
+    concept_sets = {}
+    for track in AI_TRACKS:
+        learner = Learner(
+            name=f"{track.id} learner",
+            experience_level="beginner",
+            goal_text=f"Learn {track.name}",
+            track=track.id,
+        )
+        curriculum = curriculum_service._fallback_curriculum(learner)
+        concepts = [concept for topic in curriculum.topics for concept in topic.concepts]
+
+        assert len(set(concepts)) >= 8
+        assert all(track.id not in topic.concepts for topic in curriculum.topics)
+        assert all(
+            "Generative AI workflow" not in objective
+            for topic in curriculum.topics
+            for objective in topic.learning_objectives
+        )
+        concept_sets[track.id] = set(concepts)
+
+        first_topic = curriculum.topics[0]
+        lesson = content_service._fallback_content(
+            Topic(
+                id=f"generated-{track.id}",
+                title=first_topic.title,
+                description=first_topic.description,
+                difficulty=first_topic.difficulty,
+                concept_tags=first_topic.concepts,
+            ),
+            learner,
+            [],
+            [],
+        )
+        assert lesson.key_concepts == [
+            concept.replace("_", " ") for concept in first_topic.concepts
+        ]
+        assert "application practice" not in lesson.key_concepts
+
+    assert len({frozenset(concepts) for concepts in concept_sets.values()}) == len(AI_TRACKS)

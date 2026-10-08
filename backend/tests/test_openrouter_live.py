@@ -21,11 +21,12 @@ class LiveSmokeResponse(BaseModel):
 )
 def test_live_openrouter_structured_response():
     response = request_structured_json(
+        operation="live_structured_json_smoke",
         system_prompt="Return a JSON object with one short answer field. Do not include markdown.",
         user_payload={"question": "In one sentence, what does retrieval add to RAG?"},
         response_model=LiveSmokeResponse,
         temperature=0,
-        max_tokens=100,
+        max_tokens=1200,
     )
 
     assert response.answer.strip()

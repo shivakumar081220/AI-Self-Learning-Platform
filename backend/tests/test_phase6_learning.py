@@ -24,14 +24,17 @@ class FakeContentProvider:
 
     def __init__(self, **kwargs):
         self.chat = SimpleNamespace(
-            completions=SimpleNamespace(create=self.create_completion)
+            completions=SimpleNamespace(
+                with_raw_response=SimpleNamespace(create=self.create_raw_response)
+            )
         )
 
-    def create_completion(self, **kwargs):
+    def create_raw_response(self, **kwargs):
         FakeContentProvider.captured_messages = kwargs["messages"]
-        return SimpleNamespace(
+        response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=self.response_content))]
         )
+        return SimpleNamespace(status_code=200, parse=lambda: response)
 
 
 @pytest.fixture
