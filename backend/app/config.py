@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openrouter/free"
     openrouter_timeout_seconds: float = 30.0
+    code_sandbox_url: str = ""
+    code_sandbox_timeout_seconds: float = 10.0
     database_url: str = "sqlite:///./adaptive_learning.db"
     backend_host: str = "127.0.0.1"
     backend_port: int = 8000

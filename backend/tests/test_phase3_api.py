@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,8 +25,11 @@ def client(tmp_path) -> Generator[TestClient, None, None]:
             yield database
 
     app.dependency_overrides[get_db] = override_get_db
+    app.state.phase3_engine = engine
     yield TestClient(app)
     app.dependency_overrides.clear()
+    del app.state.phase3_engine
+    engine.dispose()
 
 
 def test_profile_creation_and_goal_selection(client: TestClient):
@@ -65,6 +69,60 @@ def test_diagnostic_generation_hides_internal_metadata(client: TestClient):
     assert all("correct_option" not in question and "explanation" not in question for question in body["questions"])
 
 
+def test_generated_course_fallback_uses_objectives_and_varies_question_design(monkeypatch):
+    topics = [
+        SimpleNamespace(
+            id="topic-retrieval",
+            title="Retrieval Foundations",
+            concept_tags=["retrieval", "ranking"],
+            learning_objectives_json=[
+                "Select relevant source passages",
+                "Rank passages against a user question",
+            ],
+        ),
+        SimpleNamespace(
+            id="topic-embeddings",
+            title="Embedding Search",
+            concept_tags=["embeddings"],
+            learning_objectives_json=["Compare semantic vectors for similarity"],
+        ),
+    ]
+    course = SimpleNamespace(id=42)
+    monkeypatch.setattr(
+        diagnostic_service,
+        "_diagnostic_topic_catalog",
+        lambda database, learner_id, track_id, owner_user_id: topics,
+    )
+    monkeypatch.setattr(
+        diagnostic_service,
+        "_current_course",
+        lambda database, learner_id: course,
+    )
+
+    question_set = diagnostic_service._fallback_questions(
+        database=None,
+        experience_level="beginner",
+        track_id="ai_agents",
+        learner_id=7,
+    )
+    questions = question_set.questions
+
+    assert len(questions) == 8
+    assert len({question.id for question in questions}) == 8
+    assert {question.concept for question in questions} == {"retrieval", "ranking", "embeddings"}
+    assert {question.difficulty for question in questions} == {
+        "beginner",
+        "intermediate",
+        "advanced",
+    }
+    assert {question.correct_option for question in questions} == {0, 1, 2, 3}
+    assert any(
+        "Select relevant source passages" in question.options[question.correct_option]
+        for question in questions
+    )
+    assert all(len(set(question.options)) == len(question.options) for question in questions)
+
+
 def test_diagnostic_submission_persists_deterministic_skill_scores(client: TestClient):
     learner = client.post(
         "/api/learners",
@@ -77,10 +135,19 @@ def test_diagnostic_submission_persists_deterministic_skill_scores(client: TestC
     generated = client.post(
         f"/api/learners/{learner['id']}/diagnostic/generate"
     ).json()
-    answers = [
-        {"question_id": question["id"], "selected_option": 0}
-        for question in generated["questions"]
-    ]
+    with Session(app.state.phase3_engine) as database:
+        assessment = database.get(Assessment, generated["assessment_id"])
+        answers = [
+            {
+                "question_id": question["id"],
+                "selected_option": (
+                    question["correct_option"]
+                    if index % 2 == 0
+                    else (question["correct_option"] + 1) % len(question["options"])
+                ),
+            }
+            for index, question in enumerate(assessment.questions_json)
+        ]
 
     response = client.post(
         f"/api/learners/{learner['id']}/diagnostic/{generated['assessment_id']}/submit",
@@ -93,6 +160,10 @@ def test_diagnostic_submission_persists_deterministic_skill_scores(client: TestC
     assert len(body["skills"]) == 8
     assert body["weak_areas"]
     assert body["strong_areas"]
+    assert len(body["concept_insights"]) == 8
+    assert all(insight["total_questions"] == 1 for insight in body["concept_insights"])
+    assert all(insight["evidence_statement"].startswith("Evidence:") for insight in body["concept_insights"])
+    assert all(insight["improvement_plan"] for insight in body["concept_insights"])
 
     skills = client.get(f"/api/learners/{learner['id']}/skills")
     assert skills.status_code == 200

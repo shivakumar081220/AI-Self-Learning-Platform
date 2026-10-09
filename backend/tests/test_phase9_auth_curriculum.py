@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.models import GeneratedCourse, Learner, LearningPath, Topic, TopicProgress
+from app.models import GeneratedCourse, Learner, LearningGoal, LearningPath, SkillScore, Topic, TopicProgress
+from app.schemas import CurriculumTopic, GeneratedCurriculum
 from app.seed_topics import seed_topics
 from app.services import content_service, curriculum_service
 from app.topic_titles import display_topic_title
@@ -104,6 +105,16 @@ def test_generated_curriculum_is_persisted_and_path_uses_generated_topics(client
     assert first["generation_source"] == "deterministic_fallback"
     assert second["source"] == "persisted"
     assert second["generation_source"] == "deterministic_fallback"
+    assert len(first["modules"]) >= 3
+    assert [module["order"] for module in first["modules"]] == list(
+        range(1, len(first["modules"]) + 1)
+    )
+    module_topic_ids = [
+        topic["topic_id"]
+        for module in first["modules"]
+        for topic in module["topics"]
+    ]
+    assert set(module_topic_ids) == {topic["topic_id"] for topic in first["topics"]}
 
     path = client.post(f"/api/learners/{learner['id']}/learning-path/generate", headers=headers)
     assert path.status_code == 200
@@ -118,6 +129,13 @@ def test_generated_curriculum_is_persisted_and_path_uses_generated_topics(client
     assert current["title"] == next(
         item["title"] for item in first["topics"] if item["topic_id"] == current["topic_id"]
     )
+    current_module = next(
+        module for module in first["modules"]
+        if current["topic_id"] in {topic["topic_id"] for topic in module["topics"]}
+    )
+    assert current["module_id"] == current_module["module_id"]
+    assert current["module_title"] == current_module["title"]
+    assert current["module_learning_objectives"] == current_module["learning_objectives"]
 
 
 def test_legacy_generated_title_marker_is_hidden_from_course_and_path_responses(
@@ -265,7 +283,7 @@ def test_each_enrolled_course_keeps_its_own_learning_path_and_progress(client: T
     assert resumed_first_path["path_id"] == first_path["path_id"]
     assert resumed_first_path["course_id"] == first_course_id
     assert resumed_first_path["topics"][0]["topic_id"] == first_topic_id
-    assert resumed_first_path["topics"][0]["status"] == "completed"
+    assert resumed_first_path["topics"][0]["status"] == "current"
     assert all(item["status"] in {"current", "pending"} for item in second_path["topics"])
 
 
@@ -284,18 +302,58 @@ def test_user_can_resume_progress_after_login_again(client: TestClient):
     assert summary.status_code == 200
     resumed_path = client.get(f"/api/learners/{learner['id']}/learning-path", headers=resumed_headers)
     assert resumed_path.status_code == 200
-    assert resumed_path.json()["current_topic_id"] != current_id
+    assert resumed_path.json()["current_topic_id"] == current_id
 
 
 def test_mocked_ai_curriculum_structures_differ(monkeypatch):
     from app.models import Learner
 
-    rag = Learner(name="Rag", experience_level="beginner", goal_text="Learn RAG")
-    agents = Learner(name="Agents", experience_level="advanced", goal_text="Build AI agents")
+    rag = Learner(
+        name="Rag",
+        experience_level="beginner",
+        goal_text="Learn RAG",
+        track="rag",
+    )
+    agents = Learner(
+        name="Agents",
+        experience_level="advanced",
+        goal_text="Build AI agents",
+        track="ai_agents",
+    )
     rag_curriculum = curriculum_service._fallback_curriculum(rag)
     agent_curriculum = curriculum_service._fallback_curriculum(agents)
     assert rag_curriculum.course_title != agent_curriculum.course_title
     assert [topic.title for topic in rag_curriculum.topics] != [topic.title for topic in agent_curriculum.topics]
+
+
+def test_advanced_curriculum_skips_only_mastered_foundation_modules(client: TestClient):
+    learner = Learner(
+        name="Advanced Python",
+        experience_level="advanced",
+        goal_text="Build AI data pipelines",
+        track="python_for_ai",
+    )
+    with Session(app.state.phase9_engine) as database:
+        database.add(learner)
+        database.flush()
+        for concept in curriculum_service.TRACK_CONCEPTS["python_for_ai"][0] + curriculum_service.TRACK_CONCEPTS["python_for_ai"][1]:
+            database.add(
+                SkillScore(
+                    learner_id=learner.id,
+                    concept=concept,
+                    score=0.95,
+                    evidence_count=4,
+                    confidence=0.9,
+                    source="assessment",
+                )
+            )
+        database.flush()
+
+        curriculum = curriculum_service._fallback_curriculum(learner, database)
+
+    assert len(curriculum.modules) == 3
+    assert curriculum.modules[0].title == "Collections and Data Cleaning"
+    assert "Demonstrated foundational skills are omitted" in curriculum.description
 
 
 def test_fallback_curricula_and_lessons_use_track_specific_concepts():
@@ -327,14 +385,178 @@ def test_fallback_curricula_and_lessons_use_track_specific_concepts():
                 description=first_topic.description,
                 difficulty=first_topic.difficulty,
                 concept_tags=first_topic.concepts,
+                track_id=track.id,
             ),
             learner,
             [],
             [],
         )
-        assert lesson.key_concepts == [
+        expected_concepts = [
             concept.replace("_", " ") for concept in first_topic.concepts
         ]
+        if len(expected_concepts) == 1:
+            expected_concepts.append(first_topic.title)
+        assert lesson.key_concepts == expected_concepts
         assert "application practice" not in lesson.key_concepts
+        assert len(lesson.sections) >= 2
+        assert all(section.subsections for section in lesson.sections)
+        if track.id in {"rag", "ai_agents"}:
+            assert lesson.coding_example
+            assert "model_name" not in lesson.coding_example.code
 
     assert len({frozenset(concepts) for concepts in concept_sets.values()}) == len(AI_TRACKS)
+
+
+def test_python_variables_fallback_has_correct_runnable_output():
+    learner = Learner(
+        name="Python learner",
+        experience_level="beginner",
+        goal_text="Configure a model",
+        track="python_for_ai",
+    )
+    topic = Topic(
+        id="generated-python-variables",
+        title="Variables and Data Types",
+        description="Python variables bind names to values such as strings, numbers, and booleans.",
+        difficulty="beginner",
+        concept_tags=["variables_and_types"],
+        track_id="python_for_ai",
+    )
+
+    lesson = content_service._fallback_content(topic, learner, [], [])
+
+    assert lesson.coding_example
+    assert lesson.coding_example.expected_output == (
+        "Linear Regression\n0.01\n100\nFalse"
+    )
+    assert "model_name = \"Linear Regression\"" in lesson.coding_example.code
+
+
+def test_goal_change_reuses_completed_topics_with_matching_mastered_concepts(
+    client: TestClient, monkeypatch
+):
+    _, headers = register(client, "Goal Change Learner", "goal-change@example.com")
+    learner = onboard(client, headers, "rag", "Goal Change Learner")
+    old_course = client.get("/api/curriculum/current", headers=headers).json()
+    old_topic = old_course["topics"][0]
+    old_concepts = set(old_topic["concepts"])
+    assert old_concepts
+
+    with Session(app.state.phase9_engine) as database:
+        database.add(
+            TopicProgress(
+                learner_id=learner["id"],
+                topic_id=old_topic["topic_id"],
+                status="completed",
+                lesson_completed=True,
+                mastery_score=0.95,
+                attempt_count=1,
+            )
+        )
+        database.commit()
+
+    profile = client.put(
+        "/api/learners/me",
+        headers=headers,
+        json={
+            "name": "Goal Change Learner",
+            "experience_level": "beginner",
+            "track_id": "python_for_ai",
+            "custom_goal": "Learn Python for data work",
+        },
+    )
+    assert profile.status_code == 200, profile.text
+
+    new_curriculum = GeneratedCurriculum(
+        course_title="Python data work",
+        description="A practical Python course focused on analysis and data preparation.",
+        track_id="python_for_ai",
+        goal="Learn Python for data work",
+        level="beginner",
+        estimated_duration="3 hours",
+        learning_objectives=[
+            "Prepare data with Python",
+            "Apply reliable data workflows",
+            "Evaluate data transformations",
+        ],
+        topics=[
+            CurriculumTopic(
+                title="Previously Mastered Foundations",
+                description="Review foundational concepts already demonstrated in earlier learning.",
+                learning_objectives=["Explain prior concepts", "Apply them to a Python workflow"],
+                difficulty="beginner",
+                concepts=list(old_concepts),
+                estimated_minutes=30,
+            ),
+            CurriculumTopic(
+                title="New Python Analysis",
+                description="Use Python to inspect and transform a new dataset.",
+                learning_objectives=["Inspect a dataset", "Transform its values"],
+                difficulty="beginner",
+                concepts=["new_data_inspection", "new_data_transformation"],
+                prerequisites=["Previously Mastered Foundations"],
+                estimated_minutes=40,
+            ),
+            CurriculumTopic(
+                title="Evaluating Data Work",
+                description="Check the quality of a small data preparation workflow.",
+                learning_objectives=["Check transformed output", "Explain quality limits"],
+                difficulty="beginner",
+                concepts=["new_data_quality", "new_workflow_review"],
+                prerequisites=["New Python Analysis"],
+                estimated_minutes=40,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        curriculum_service,
+        "generate_curriculum",
+        lambda _learner, _database: (new_curriculum, "deterministic_fallback"),
+    )
+    generated = client.post("/api/curriculum/generate", headers=headers)
+    assert generated.status_code == 200, generated.text
+    new_course = generated.json()
+    assert new_course["course_id"] != old_course["course_id"]
+
+    new_topic_id = next(
+        topic["topic_id"]
+        for topic in new_course["topics"]
+        if topic["title"] == "Previously Mastered Foundations"
+    )
+    path_response = client.post(
+        f"/api/learners/{learner['id']}/learning-path/generate?course_id={new_course['course_id']}",
+        headers=headers,
+    )
+    assert path_response.status_code == 200, path_response.text
+    reused_topic = next(
+        item for item in path_response.json()["topics"] if item["topic_id"] == new_topic_id
+    )
+    assert reused_topic["status"] == "completed"
+
+    previous_course_dashboard = client.get(
+        f"/api/learners/{learner['id']}/dashboard?course_id={old_course['course_id']}",
+        headers=headers,
+    )
+    new_course_dashboard = client.get(
+        f"/api/learners/{learner['id']}/dashboard?course_id={new_course['course_id']}",
+        headers=headers,
+    )
+    assert previous_course_dashboard.json()["completed_topics"] == 1
+    assert new_course_dashboard.json()["completed_topics"] == 1
+    with Session(app.state.phase9_engine) as database:
+        goals = database.scalars(
+            select(LearningGoal)
+            .where(LearningGoal.learner_id == learner["id"])
+            .order_by(LearningGoal.id)
+        ).all()
+        saved_courses = database.scalars(
+            select(GeneratedCourse).where(
+                GeneratedCourse.learner_id == learner["id"]
+            )
+        ).all()
+        assert len(goals) == 2
+        assert [goal.is_active for goal in goals] == [False, True]
+        assert {course.id for course in saved_courses} >= {
+            old_course["course_id"],
+            new_course["course_id"],
+        }

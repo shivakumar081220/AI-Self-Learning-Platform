@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -56,6 +57,7 @@ def test_structured_request_uses_configured_openrouter_and_learner_context(monke
         "api_key": "test-provider-key",
         "base_url": "https://router.example/v1",
         "timeout": 12.5,
+        "max_retries": 0,
     }
     request = FakeOpenRouter.request_kwargs
     assert request["model"] == "router/test-model"
@@ -136,6 +138,43 @@ def test_malformed_json_is_reported_as_provider_error(monkeypatch, caplog):
     FakeOpenRouter.content = '{"answer":"A validated answer."}'
 
 
+def test_empty_model_response_gets_one_retry_then_returns_provider_error(monkeypatch):
+    class EmptyResponseOpenRouter:
+        attempts = 0
+
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    with_raw_response=SimpleNamespace(create=self.create_raw)
+                )
+            )
+
+        def create_raw(self, **kwargs):
+            EmptyResponseOpenRouter.attempts += 1
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=" "),
+                    )
+                ]
+            )
+            return SimpleNamespace(status_code=200, parse=lambda: response)
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-provider-key")
+    monkeypatch.setattr(ai_provider, "OpenAI", EmptyResponseOpenRouter)
+
+    with pytest.raises(ai_provider.AIProviderError, match="empty structured content"):
+        ai_provider.request_structured_json(
+            operation="provider_empty_response_test",
+            system_prompt="Answer as a tutor.",
+            user_payload={"question": "Explain embeddings."},
+            response_model=TutorPayload,
+        )
+
+    assert EmptyResponseOpenRouter.attempts == 2
+
+
 def test_fenced_json_is_extracted_then_schema_validated(monkeypatch):
     monkeypatch.setattr(settings, "openrouter_api_key", "test-provider-key")
     FakeOpenRouter.content = '```json\n{"answer":"A validated answer."}\n```'
@@ -187,6 +226,88 @@ def test_malformed_response_gets_one_real_provider_retry(monkeypatch):
 
     assert result.answer == "A validated answer."
     assert RetryingOpenRouter.attempts == 2
+
+
+def test_request_can_bound_timeout_and_disable_retry(monkeypatch):
+    class SingleAttemptOpenRouter:
+        attempts = 0
+        init_kwargs = {}
+
+        def __init__(self, **kwargs):
+            type(self).init_kwargs = kwargs
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    with_raw_response=SimpleNamespace(create=self.create_raw)
+                )
+            )
+
+        def create_raw(self, **kwargs):
+            type(self).attempts += 1
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content="not JSON"),
+                    )
+                ]
+            )
+            return SimpleNamespace(status_code=200, parse=lambda: response)
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-provider-key")
+    monkeypatch.setattr(ai_provider, "OpenAI", SingleAttemptOpenRouter)
+
+    with pytest.raises(ai_provider.AIProviderError, match="malformed JSON"):
+        ai_provider.request_structured_json(
+            operation="provider_single_attempt_test",
+            system_prompt="Answer as a tutor.",
+            user_payload={"question": "Explain embeddings."},
+            response_model=TutorPayload,
+            timeout_seconds=8.0,
+            retry_on_failure=False,
+        )
+
+    assert SingleAttemptOpenRouter.init_kwargs["timeout"] == 8.0
+    assert SingleAttemptOpenRouter.attempts == 1
+
+
+def test_hard_timeout_cancels_async_provider_request(monkeypatch):
+    class SlowAsyncOpenRouter:
+        cancelled = False
+
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    with_raw_response=SimpleNamespace(create=self.create_raw)
+                )
+            )
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def create_raw(self, **kwargs):
+            try:
+                await asyncio.sleep(1)
+            finally:
+                type(self).cancelled = True
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-provider-key")
+    monkeypatch.setattr(ai_provider, "AsyncOpenAI", SlowAsyncOpenRouter)
+
+    with pytest.raises(ai_provider.AIProviderError, match="request failed"):
+        ai_provider.request_structured_json(
+            operation="provider_hard_timeout_test",
+            system_prompt="Answer as a tutor.",
+            user_payload={"question": "Explain embeddings."},
+            response_model=TutorPayload,
+            timeout_seconds=0.05,
+            hard_timeout_seconds=0.05,
+            retry_on_failure=False,
+        )
+
+    assert SlowAsyncOpenRouter.cancelled
 
 
 def test_rate_limit_gets_one_retry_respecting_retry_after(monkeypatch, caplog):

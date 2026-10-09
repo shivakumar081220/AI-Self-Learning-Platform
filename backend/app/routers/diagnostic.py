@@ -8,6 +8,7 @@ from ..database import get_db
 from ..models import Assessment, Learner, SkillScore
 from ..schemas import (
     DiagnosticGenerateResponse,
+    DiagnosticConceptInsight,
     DiagnosticQuestionPublic,
     DiagnosticSubmitRequest,
     DiagnosticSubmitResponse,
@@ -16,7 +17,11 @@ from ..schemas import (
     SkillInterpretationResponse,
     SkillScoreResponse,
 )
-from ..services.diagnostic_service import generate_diagnostic, score_diagnostic
+from ..services.diagnostic_service import (
+    build_diagnostic_concept_insights,
+    generate_diagnostic,
+    score_diagnostic,
+)
 from ..models import User
 from ..security import ensure_learner_access, get_optional_user
 from .learners import build_skill_analysis
@@ -148,11 +153,18 @@ def get_diagnostic_result(
         raise HTTPException(status_code=409, detail="Diagnostic assessment has not been submitted")
     skills = database.scalars(select(SkillScore).where(SkillScore.learner_id == learner_id)).all()
     analysis = build_skill_analysis(learner_id, skills)
+    question_review = _diagnostic_question_review(assessment)
     stored_interpretation = (assessment.feedback_json or {}).get("ai_interpretation")
+    stored_insights = (assessment.feedback_json or {}).get("concept_insights")
     return DiagnosticSubmitResponse(
         assessment_id=assessment.id,
         answered_questions=len(assessment.answers_json),
-        question_review=_diagnostic_question_review(assessment),
+        question_review=question_review,
+        concept_insights=(
+            [DiagnosticConceptInsight.model_validate(item) for item in stored_insights]
+            if stored_insights
+            else build_diagnostic_concept_insights(database, learner, question_review)
+        ),
         ai_interpretation=(
             SkillInterpretationResponse.model_validate(stored_interpretation)
             if stored_interpretation
@@ -251,15 +263,19 @@ def submit_learner_diagnostic(
         **interpretation.model_dump(),
         source=interpretation_source,
     )
+    question_review = _diagnostic_question_review(assessment)
+    concept_insights = build_diagnostic_concept_insights(database, learner, question_review)
     assessment.feedback_json = {
         **(assessment.feedback_json or {}),
         "ai_interpretation": ai_interpretation.model_dump(),
+        "concept_insights": [insight.model_dump() for insight in concept_insights],
     }
     database.commit()
     return DiagnosticSubmitResponse(
         assessment_id=assessment_id,
         answered_questions=len(payload.answers),
-        question_review=_diagnostic_question_review(assessment),
+        question_review=question_review,
+        concept_insights=concept_insights,
         ai_interpretation=ai_interpretation,
         **analysis.model_dump(),
     )

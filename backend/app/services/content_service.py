@@ -1,4 +1,6 @@
+import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import ValidationError
@@ -6,8 +8,26 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Assessment, Learner, SkillScore, Topic, TopicPrerequisite, TopicProgress
-from ..schemas import CodingExample, LearningContent
+from ..models import (
+    AIArtifactCache,
+    Assessment,
+    GeneratedCourse,
+    Learner,
+    SkillScore,
+    Topic,
+    TopicPrerequisite,
+    TopicProgress,
+    Weakness,
+)
+from ..schemas import (
+    CodingExample,
+    LearningContent,
+    LessonCodeExample,
+    LessonMistake,
+    LessonSection,
+    LessonSelfCheck,
+    LessonSubsection,
+)
 from ..topic_titles import display_topic_title
 from ..track_catalog import TRACK_BY_ID
 from .ai_cache import get_or_generate_artifact
@@ -254,39 +274,104 @@ CURATED_CONTENT: dict[str, dict[str, Any]] = {
 
 
 def _is_technical_topic(topic: Topic) -> bool:
-    text = " ".join([topic.title, topic.description, *topic.concept_tags]).lower()
-    return "ai" in topic.title.lower().split() or any(
-        term in text
-        for term in ("python", "prompt", "embedding", "vector", "retriev", "rag", "agent", "tool", "llm", "evaluation", "api", "code")
+    if topic.track_id in {"python_for_ai", "machine_learning", "deep_learning", "nlp"}:
+        return True
+    return bool(
+        set(topic.concept_tags).intersection(
+            {
+                "prompt_design", "structured_outputs", "tool_calling",
+                "document_chunking", "embeddings", "vector_search",
+                "retrieval_ranking", "hybrid_search", "grounded_generation",
+                "tool_schemas", "argument_validation", "task_decomposition",
+                "state_management", "orchestration",
+            }
+        )
     )
 
 
 def _fallback_coding_example(topic: Topic) -> CodingExample:
     topic_title = display_topic_title(topic.title)
-    text = " ".join([topic_title, *topic.concept_tags]).lower()
-    if "embedding" in text or "vector" in text:
+    concepts = set(topic.concept_tags)
+    track_id = topic.track_id or "generative_ai"
+    if concepts.intersection({"tool_schemas", "argument_validation", "task_decomposition", "planning", "orchestration"}):
+        track_id = "ai_agents"
+    elif concepts.intersection({"retrieval", "embeddings", "vector_search", "grounded_generation", "citations"}):
+        track_id = "rag"
+    if track_id == "python_for_ai" and "variables_and_types" in concepts:
         code = (
-            "from math import sqrt\n\n"
-            "query = [1.0, 0.0]\n"
-            "candidate = [0.8, 0.2]\n"
-            "dot = sum(left * right for left, right in zip(query, candidate))\n"
-            "norm = sqrt(sum(value * value for value in query) * sum(value * value for value in candidate))\n"
-            "print(round(dot / norm, 2))"
+            'model_name = "Linear Regression"\n'
+            "learning_rate = 0.01\n"
+            "epochs = 100\n"
+            "is_trained = False\n\n"
+            "print(model_name)\n"
+            "print(learning_rate)\n"
+            "print(epochs)\n"
+            "print(is_trained)"
         )
-        output = "0.97"
-        explanation = "The dot product divided by both vector lengths estimates their cosine similarity."
-        mistake = "Comparing vectors with different dimensions or forgetting to normalize the dot product."
-    elif "prompt" in text:
+        output = "Linear Regression\n0.01\n100\nFalse"
+        explanation = "Strings name the model, floats store a rate, integers store a count, and a boolean records training state."
+        mistake = "Using a string for a number that must be compared or used in arithmetic."
+    elif track_id == "python_for_ai":
+        code = (
+            'records = [{"score": 0.8}, {"score": None}, {"score": 0.6}]\n'
+            'valid_scores = [row["score"] for row in records if row["score"] is not None]\n'
+            "mean_score = sum(valid_scores) / len(valid_scores)\n"
+            "print(round(mean_score, 2))"
+        )
+        output = "0.7"
+        explanation = "A list comprehension filters a missing value before calculating a summary used in data analysis."
+        mistake = "Calculating a statistic before checking whether missing values are present."
+    elif track_id == "machine_learning":
+        code = (
+            "actual = [0, 1, 1]\n"
+            "predicted = [0, 1, 0]\n"
+            "correct = sum(a == p for a, p in zip(actual, predicted))\n"
+            "accuracy = correct / len(actual)\n"
+            'print(f"accuracy: {accuracy:.2f}")'
+        )
+        output = "accuracy: 0.67"
+        explanation = "This held-out comparison counts correct predictions; accuracy alone may hide class imbalance."
+        mistake = "Reporting training accuracy as evidence that a model generalizes to unseen data."
+    elif track_id == "deep_learning":
+        code = (
+            "inputs = [0.5, 1.0]\n"
+            "weights = [0.2, 0.4]\n"
+            "bias = 0.1\n"
+            "activation = sum(x * w for x, w in zip(inputs, weights)) + bias\n"
+            'print(f"pre-activation: {activation:.2f}")'
+        )
+        output = "pre-activation: 0.60"
+        explanation = "A neuron combines inputs, weights, and bias before an activation function transforms the result."
+        mistake = "Combining input and weight vectors with mismatched dimensions."
+    elif track_id == "nlp":
+        code = (
+            'text = "Models learn from labeled examples"\n'
+            "tokens = text.lower().split()\n"
+            "print(tokens[:3])"
+        )
+        output = "['models', 'learn', 'from']"
+        explanation = "This simple tokenizer creates word-level units; production tokenizers also handle punctuation and subwords."
+        mistake = "Removing negation or punctuation without checking whether it changes the label meaning."
+    elif track_id == "generative_ai":
         code = (
             'task = "Summarize the support request"\n'
             'constraints = ["Use two bullets", "Do not invent policy"]\n'
-            'prompt = f"{task}. Constraints: {\'; \'.join(constraints)}"\n'
+            'prompt = task + ". Constraints: " + "; ".join(constraints)\n'
             "print(prompt)"
         )
         output = "Summarize the support request. Constraints: Use two bullets; Do not invent policy"
-        explanation = "The example makes task and constraints explicit before a model call."
-        mistake = "Giving a vague task without specifying boundaries or the response format."
-    elif "retriev" in text or "rag" in text:
+        explanation = "The prompt separates the task from constraints that can later be checked."
+        mistake = "Assuming a well-formed prompt guarantees the model response is factual."
+    elif track_id == "llms":
+        code = (
+            'messages = [{"role": "user", "content": "Explain attention"}]\n'
+            'approximate_words = len(messages[0]["content"].split())\n'
+            "print(approximate_words)"
+        )
+        output = "2"
+        explanation = "The example inspects a message payload; word counts are not model token counts."
+        mistake = "Treating word count as an exact token count or ignoring the model context limit."
+    elif track_id == "rag":
         code = (
             'documents = ["Refunds take five days", "Shipping takes two days"]\n'
             'query = "refund timing"\n'
@@ -294,35 +379,157 @@ def _fallback_coding_example(topic: Topic) -> CodingExample:
             "print(matches[0])"
         )
         output = "Refunds take five days"
-        explanation = "This toy retrieval step selects candidate context before generation."
+        explanation = "This toy lexical retrieval selects candidate context; production RAG also needs ranking and citations."
         mistake = "Treating a keyword match as proof the retrieved statement fully answers the question."
-    elif "agent" in text or "tool" in text:
+    else:
         code = (
             'tools = {"search": lambda query: f"Results for: {query}"}\n'
             'requested_tool = "search"\n'
-            'if requested_tool in tools:\n'
+            "if requested_tool in tools:\n"
             '    print(tools[requested_tool]("vector databases"))'
         )
         output = "Results for: vector databases"
-        explanation = "The application checks the requested tool against an allowlist before calling it."
+        explanation = "The application checks a requested tool against an allowlist before executing it."
         mistake = "Executing a model-proposed tool name or arguments without application validation."
-    else:
-        code = (
-            'messages = [{"role": "user", "content": "Explain one useful LLM pattern."}]\n'
-            'assert messages[0]["role"] == "user"\n'
-            'print(messages[0]["content"])'
-        )
-        output = "Explain one useful LLM pattern."
-        explanation = "A message object keeps user input explicit and separate from application rules."
-        mistake = "Sending unvalidated user input as trusted system instructions."
     return CodingExample(
-        title=f"Try {topic_title} in Python",
+        title=f"Apply {topic_title}",
         code=code,
         explanation=explanation,
         expected_output=output,
-        why_it_matters=f"A small executable model makes the core idea in {topic_title} concrete.",
+        why_it_matters=f"This runnable example connects {topic_title} to a practical {track_id.replace('_', ' ')} task.",
         common_mistake=mistake,
     )
+
+
+def _ensure_structured_lesson(content: LearningContent, topic: Topic, weak_concepts: list[str]) -> LearningContent:
+    topic_title = display_topic_title(topic.title)
+    concepts = content.key_concepts or [topic_title]
+    examples = content.examples or [content.practical_example]
+    tutor_prompts = [
+        f"Explain {topic_title} using a simpler example",
+        f"How is {topic_title} used in practice?",
+        f"What can go wrong when applying {topic_title}?",
+    ]
+    sections = content.sections
+    if not sections:
+        sections = [
+            LessonSection(
+                title=f"How {topic_title} works",
+                summary=content.explanation[:1200],
+                subsections=[
+                    LessonSubsection(
+                        title=concepts[0],
+                        explanation=topic.description,
+                        key_points=content.important_notes[:4],
+                        examples=examples[:2],
+                        practical_application=content.practical_example,
+                        tutor_prompts=tutor_prompts,
+                    )
+                ],
+            ),
+            LessonSection(
+                title=f"Apply {topic_title}",
+                summary=content.practical_example[:1200],
+                subsections=[
+                    LessonSubsection(
+                        title="Worked example",
+                        explanation=content.real_world_example or examples[0],
+                        key_points=content.key_concepts[:4],
+                        examples=examples[1:3],
+                        practical_application=content.practice_suggestion or content.practical_example,
+                        tutor_prompts=tutor_prompts,
+                    )
+                ],
+            ),
+        ]
+    else:
+        sections = [
+            section.model_copy(
+                update={
+                    "subsections": [
+                        subsection.model_copy(
+                            update={
+                                "key_points": subsection.key_points,
+                                "examples": subsection.examples,
+                                "practical_application": subsection.practical_application,
+                                "tutor_prompts": subsection.tutor_prompts or tutor_prompts,
+                            }
+                        )
+                        for subsection in section.subsections
+                    ]
+                }
+            )
+            for section in sections
+        ]
+
+    code_examples = content.code_examples
+    if not code_examples:
+        if content.coding_example:
+            code_examples = [
+                LessonCodeExample(
+                    title=content.coding_example.title,
+                    language="python",
+                    code=content.coding_example.code,
+                    explanation=content.coding_example.explanation,
+                    expected_output=content.coding_example.expected_output,
+                )
+            ]
+        elif content.code_example:
+            code_examples = [
+                LessonCodeExample(
+                    title=f"{topic_title} example",
+                    language="python",
+                    code=content.code_example,
+                    explanation=content.practical_example,
+                )
+            ]
+
+    mistake_details = content.common_mistake_details
+    if not mistake_details:
+        mistake_details = [
+            LessonMistake(
+                mistake=mistake,
+                explanation=(
+                    f"For {topic_title}, this can undermine the intended result: "
+                    f"{topic.description}"
+                ),
+                correction=(
+                    content.practice_suggestion
+                    or f"Apply the lesson objective to a small {topic.track_id.replace('_', ' ')} example and inspect the result."
+                ),
+            )
+            for mistake in content.common_mistakes[:6]
+        ]
+
+    payload = content.model_dump()
+    payload.update(
+        {
+            "title": content.title or topic_title,
+            "introduction": content.introduction or content.overview,
+            "why_it_matters": content.why_it_matters or content.real_world_example or content.practical_example,
+            "sections": sections,
+            "code_examples": code_examples,
+            "common_mistake_details": mistake_details,
+            "key_takeaways": content.key_takeaways or content.quick_recap[:6],
+            "self_check": content.self_check or [
+                LessonSelfCheck(
+                    question=f"How would you explain {concept} in the context of {topic_title}?",
+                    hint=f"Connect it to the lesson's practical example: {examples[0][:200]}",
+                )
+                for concept in concepts[:3]
+            ],
+            "important_points": content.important_points or content.important_notes[:6] or concepts[:6],
+            "recommended_focus": content.recommended_focus or [
+                concept for concept in weak_concepts if concept in topic.concept_tags
+            ],
+            "assessment_recommendation": (
+                content.assessment_recommendation
+                or "Try a short assessment with both concept questions and a practical application."
+            ),
+            "prerequisites": content.prerequisites,
+        }
+    )
+    return LearningContent.model_validate(payload)
 
 
 def _fallback_content(
@@ -333,26 +540,122 @@ def _fallback_content(
 ) -> LearningContent:
     topic_title = display_topic_title(topic.title)
     data = CURATED_CONTENT.get(topic.id)
+    key_concepts = (
+        list(data.get("key_concepts", []))
+        if data
+        else [concept.replace("_", " ") for concept in topic.concept_tags[:6]]
+        if topic.concept_tags
+        else [topic_title]
+    )
+    if len(key_concepts) == 1:
+        key_concepts.append(topic_title)
     if not data:
         track_name = TRACK_BY_ID.get(learner.track, TRACK_BY_ID["generative_ai"]).name
+        practice_by_track = {
+            "python_for_ai": (
+                f"Create a small data record for {learner.goal_text}, apply {topic_title}, "
+                "and print the transformed value so you can verify its type and result."
+            ),
+            "machine_learning": (
+                f"Use {topic_title} to build or inspect a classifier for {learner.goal_text}; "
+                "compare predictions with held-out labels and explain one error."
+            ),
+            "deep_learning": (
+                f"Trace how {topic_title} transforms a small input tensor in a neural network, "
+                "record its shape, and explain how the result affects training."
+            ),
+            "nlp": (
+                f"Apply {topic_title} to two short text examples for {learner.goal_text}; "
+                "inspect the transformed text and explain what information is preserved."
+            ),
+            "generative_ai": (
+                f"Write a bounded prompt for {learner.goal_text}, validate its output format, "
+                "and identify one claim that needs independent evidence."
+            ),
+            "llms": (
+                f"Trace how {topic_title} affects an LLM request for {learner.goal_text}; "
+                "inspect the input, output constraints, and one reliability trade-off."
+            ),
+            "rag": (
+                f"Retrieve source passages for {learner.goal_text}, check their relevance, and "
+                "link each generated claim to evidence from those passages."
+            ),
+            "ai_agents": (
+                f"Specify an allowed tool action for {learner.goal_text}, validate its arguments, "
+                "and inspect the observation before allowing the next step."
+            ),
+        }
+        mistake_by_track = {
+            "python_for_ai": "Using values of the wrong type or silently dropping missing records.",
+            "machine_learning": "Evaluating on training examples and assuming the score generalizes.",
+            "deep_learning": "Ignoring tensor dimensions or applying an update with the wrong shape.",
+            "nlp": "Normalizing away negation or meaningful token boundaries.",
+            "generative_ai": "Treating fluent generated text as proof that its claims are supported.",
+            "llms": "Ignoring token limits or assuming generation settings guarantee correctness.",
+            "rag": "Citing a retrieved passage that does not support the answer claim.",
+            "ai_agents": "Executing unvalidated tool names or arguments suggested by a model.",
+        }
+        practice = practice_by_track.get(
+            learner.track,
+            f"Apply {topic_title} to {learner.goal_text} and check the result against the topic objectives.",
+        )
+        objectives = topic.learning_objectives_json or [
+            f"Explain {topic_title} in the context of {track_name}",
+            f"Apply {topic_title} to the learner's selected goal and verify the result",
+        ]
+        mistake = mistake_by_track.get(
+            learner.track,
+            f"Applying {topic_title} without checking the evidence or intended outcome.",
+        )
         data = {
             "overview": topic.description,
-            "learning_objectives": [
-                f"Explain the core ideas in {topic_title}",
-                f"Apply the topic in a {track_name} task",
-            ],
-            "explanation": f"This lesson introduces {topic_title}. Start with the concepts {', '.join(topic.concept_tags)} and connect them to the goal of {learner.goal_text}.",
-            "key_concepts": (
-                [concept.replace("_", " ") for concept in topic.concept_tags[:6]]
-                if topic.concept_tags
-                else [topic_title]
+            "learning_objectives": objectives[:6],
+            "explanation": (
+                f"{topic.description} In the {track_name} workflow for {learner.goal_text}, "
+                f"{topic_title} helps connect the task inputs to a result that can be checked."
             ),
-            "examples": [f"Use {topic_title} in a task aligned to your goal: {learner.goal_text}."],
-            "practical_example": f"Design a small exercise that applies {topic_title} to {learner.goal_text}.",
-            "common_mistakes": ["Skipping the topic prerequisites", "Treating a model output as automatically correct"],
-            "quick_recap": [f"{topic_title} is part of your generated curriculum.", "Validate outputs and connect practice to your goal."],
-            "analogy": f"Think of {topic_title} as a building block in the larger system you are learning to design.",
-            "important_notes": ["This is deterministic fallback material because the AI provider was unavailable."],
+            "key_concepts": key_concepts,
+            "examples": [
+                f"{practice} Record the input, each step, and the observed output."
+            ],
+            "practical_example": practice,
+            "common_mistakes": [mistake],
+            "quick_recap": [
+                topic.description,
+                f"Verify {topic_title} against the objective: {objectives[0]}",
+            ],
+            "analogy": None,
+            "important_notes": [
+                f"Focus on {', '.join(key_concepts[:3])} and verify the result with evidence."
+            ],
+            "introduction": topic.description,
+            "why_it_matters": (
+                f"{topic_title} supports the learner's goal, {learner.goal_text}, "
+                f"by making the {track_name} workflow more explicit and testable."
+            ),
+            "common_mistake_details": [
+                {
+                    "mistake": mistake,
+                    "explanation": (
+                        f"This mistake can produce an unreliable result when using {topic_title} "
+                        f"for {learner.goal_text}."
+                    ),
+                    "correction": practice,
+                }
+            ],
+            "key_takeaways": [
+                topic.description,
+                f"Use {topic_title} to advance {learner.goal_text} and verify the result.",
+            ],
+            "self_check": [
+                {
+                    "question": f"What input and outcome would you check when applying {topic_title}?",
+                    "hint": f"Start with the objective: {objectives[0]}",
+                }
+            ],
+            "assessment_recommendation": (
+                f"Explain {topic_title}, then apply it to a small task related to {learner.goal_text}."
+            ),
         }
     else:
         data = data.copy()
@@ -360,7 +663,7 @@ def _fallback_content(
     if weak_concepts:
         explanation += " This review gives extra attention to " + ", ".join(
             concept.replace("_", " ") for concept in weak_concepts
-        ) + ", because those concepts are currently developing for you."
+        ) + ", because they are identified as areas to focus on."
     if learner.experience_level == "advanced":
         explanation += " At an advanced level, focus on the trade-offs between quality, control, and system complexity."
     payload = {
@@ -372,57 +675,127 @@ def _fallback_content(
         "prerequisites": prerequisites,
         "practice_suggestion": data.get(
             "practice_suggestion",
-            f"Explain {topic_title} in your own words, then apply it to {learner.goal_text}.",
+            data["practical_example"],
         ),
     }
     if _is_technical_topic(topic):
         payload["coding_example"] = _fallback_coding_example(topic).model_dump()
-    return LearningContent.model_validate(payload)
+    coding_example = payload.get("coding_example")
+    worked_explanation = (
+        coding_example["explanation"]
+        if coding_example
+        else data.get("real_world_example", data["practical_example"])
+    )
+    worked_points = (
+        [
+            coding_example["why_it_matters"],
+            f"Expected output: {coding_example['expected_output']}"
+            if coding_example.get("expected_output")
+            else "Compare the observed result with the stated objective.",
+        ]
+        if coding_example
+        else data.get("important_notes", [])[:3]
+    )
+    worked_examples = (
+        [f"Expected output: {coding_example['expected_output']}"]
+        if coding_example and coding_example.get("expected_output")
+        else data.get("examples", [])[:2]
+    )
+    payload["sections"] = [
+        LessonSection(
+            title=f"Understand {topic_title}",
+            summary=data["explanation"][:1200],
+            subsections=[
+                LessonSubsection(
+                    title=key_concepts[0],
+                    explanation=data["explanation"],
+                    key_points=data.get("important_notes", [])[:4] or key_concepts[:4],
+                    examples=data.get("examples", [])[:2],
+                    practical_application=data["practical_example"],
+                    tutor_prompts=[
+                        f"Explain {topic_title} with a simpler example",
+                        f"How does {topic_title} apply to {learner.goal_text}?",
+                    ],
+                )
+            ],
+        ),
+        LessonSection(
+            title=f"Apply {topic_title}",
+            summary=worked_explanation[:1200],
+            subsections=[
+                LessonSubsection(
+                    title="Worked example",
+                    explanation=worked_explanation,
+                    key_points=worked_points[:4] or key_concepts[:4],
+                    examples=worked_examples,
+                    practical_application=data["practical_example"],
+                    tutor_prompts=[
+                        f"Walk me through this {topic_title} example",
+                        f"What could go wrong when applying {topic_title}?",
+                    ],
+                )
+            ],
+        ),
+    ]
+    return _ensure_structured_lesson(LearningContent.model_validate(payload), topic, weak_concepts)
 
 
 def _openrouter_content(
     topic: Topic,
     learner: Learner,
     weak_concepts: list[str],
+    strong_concepts: list[str],
     completed_topics: list[str],
     recent_assessments: list[dict[str, Any]],
     prerequisites: list[str],
+    course_context: dict[str, Any] | None,
 ) -> LearningContent:
     context = {
         "learner": {
             "experience_level": learner.experience_level,
             "goal": learner.goal_text,
             "target_outcome": learner.target_outcome,
-            "track_id": learner.track,
+            "track_id": course_context.get("track_id", learner.track) if course_context else learner.track,
             "weak_concepts": weak_concepts,
+            "strong_concepts": strong_concepts,
             "completed_topics": completed_topics[-3:],
-            "recent_assessments": recent_assessments[:2],
+            "recent_assessments": recent_assessments[:5],
         },
+        "course": course_context,
         "current_topic": {
             "id": topic.id,
             "title": display_topic_title(topic.title),
             "description": topic.description,
             "concepts": topic.concept_tags,
+            "learning_objectives": topic.learning_objectives_json[:8],
         },
         "prerequisites": prerequisites,
     }
     parsed = request_structured_json(
         operation="learning_content",
         system_prompt=(
-            "You are a careful Generative AI instructor. Teach only the supplied current topic. "
-            "Adapt depth to experience, goal, and weak concepts. Include a short real-world example, "
-            "a targeted practice suggestion, and the supplied prerequisites. For technical AI topics, "
-            "include a structured Python coding example with title, code, explanation, expected output "
-            "when useful, why it matters, and a common mistake. Return JSON matching the requested "
-            "learning-content schema. Keep topic_id and topic_title exactly equal to the supplied values. "
-            "All required schema fields must be present with their declared JSON types; omit unsupported "
-            "properties and return no additional fields. Use valid JSON only, without Markdown or code fences. "
-            "Do not invent topic IDs or unrelated curriculum topics."
+            "You are an expert instructional designer and technical teacher creating a complete, "
+            "self-guided lesson for an adaptive AI learning platform. Help the learner understand, "
+            "remember, apply, and practice; do not return a shallow summary or filler. Teach only the "
+            "supplied topic in progressive steps: basic idea, deeper explanation, example, application. "
+            "Respect completed and strong knowledge; do not re-teach mastered prerequisites. Connect "
+            "the lesson to the learner's goal, current course, recent assessment results, and relevant "
+            "weak concepts; identify relevant weak concepts in recommended_focus. Put each major idea "
+            "in sections and subsections with a clear explanation, key points, a concrete example, "
+            "practical application, and three short tutor_prompts. Explain mathematical intuition "
+            "before formulas. For code or ML topics include a useful small code example; for architecture "
+            "topics explain components or workflows and use scenarios instead of forced code. Include "
+            "why_it_matters, prerequisites, important_points, common mistakes with explanations and "
+            "corrections, key_takeaways, a short self_check with hints, a practice suggestion, and an "
+            "assessment recommendation. Keep chunks concise, technically accurate, and relevant. "
+            "Return JSON matching the requested LearningContent schema. Keep topic_id and topic_title "
+            "exactly equal to the supplied values. Use valid JSON only; do not add Markdown fences, "
+            "invent learner history, reveal secrets, or add unrelated topics."
         ),
         user_payload={"context": context},
         response_model=LearningContent,
         temperature=0.3,
-        max_tokens=2600,
+        max_tokens=5000,
     )
     if parsed.topic_id != topic.id or parsed.topic_title != display_topic_title(topic.title):
         logger.warning(
@@ -431,6 +804,43 @@ def _openrouter_content(
             settings.openrouter_model,
         )
         raise ValueError("AI content topic does not match the curated topic")
+    missing_learning_sections = [
+        name
+        for name, value in (
+            ("introduction", parsed.introduction),
+            ("why_it_matters", parsed.why_it_matters),
+            ("practice_suggestion", parsed.practice_suggestion),
+            ("assessment_recommendation", parsed.assessment_recommendation),
+        )
+        if not value
+    ]
+    if (
+        not parsed.sections
+        or any(not section.subsections for section in parsed.sections)
+        or not parsed.self_check
+        or not parsed.common_mistake_details
+        or len(parsed.key_takeaways) < 2
+    ):
+        missing_learning_sections.extend(
+            [
+                name
+                for name, present in (
+                    ("teaching_sections", bool(parsed.sections) and all(section.subsections for section in parsed.sections)),
+                    ("self_check", bool(parsed.self_check)),
+                    ("common_mistake_details", bool(parsed.common_mistake_details)),
+                    ("key_takeaways", len(parsed.key_takeaways) >= 2),
+                )
+                if not present
+            ]
+        )
+    if missing_learning_sections:
+        logger.warning(
+            "OpenRouter structured response failed semantic validation; operation=learning_content "
+            "model=%s validation_error=incomplete_lesson missing_fields=%s unexpected_fields=[]",
+            settings.openrouter_model,
+            sorted(set(missing_learning_sections)),
+        )
+        raise ValueError("AI lesson is incomplete")
     if not parsed.real_world_example or not parsed.practice_suggestion:
         missing_fields = [
             field
@@ -447,13 +857,38 @@ def _openrouter_content(
             missing_fields,
         )
         raise ValueError("AI lesson is missing required learning guidance")
-    if _is_technical_topic(topic) and not parsed.coding_example:
+    if _is_technical_topic(topic) and not parsed.coding_example and not parsed.code_examples:
         logger.warning(
             "OpenRouter structured response failed semantic validation; operation=learning_content "
             "model=%s validation_error=missing_coding_example missing_fields=[coding_example] unexpected_fields=[]",
             settings.openrouter_model,
         )
         raise ValueError("AI lesson is missing its required coding example")
+    lesson_text = json.dumps(parsed.model_dump(mode="json"), ensure_ascii=True).lower()
+    concept_terms = [
+        concept.replace("_", " ").casefold()
+        for concept in topic.concept_tags
+        if len(concept.replace("_", " ")) >= 4
+    ]
+    if concept_terms and not any(term in lesson_text for term in concept_terms):
+        logger.warning(
+            "OpenRouter structured response failed semantic validation; operation=learning_content "
+            "model=%s validation_error=topic_relevance missing_fields=[] unexpected_fields=[]",
+            settings.openrouter_model,
+        )
+        raise ValueError("AI lesson does not teach the selected topic concepts")
+    filler_phrases = (
+        "design a small exercise",
+        "application practice",
+        "larger system you are learning to design",
+    )
+    if any(phrase in lesson_text for phrase in filler_phrases):
+        logger.warning(
+            "OpenRouter structured response failed semantic validation; operation=learning_content "
+            "model=%s validation_error=generic_filler missing_fields=[] unexpected_fields=[]",
+            settings.openrouter_model,
+        )
+        raise ValueError("AI lesson contains generic filler")
     return parsed.model_copy(
         update={
             "prerequisites": prerequisites,
@@ -462,50 +897,143 @@ def _openrouter_content(
     )
 
 
+def _previous_course_lesson(
+    topic: Topic, learner: Learner, database: Session
+) -> tuple[LearningContent, str] | None:
+    if topic.course_id is None:
+        return None
+    artifacts = database.scalars(
+        select(AIArtifactCache)
+        .where(
+            AIArtifactCache.learner_id == learner.id,
+            AIArtifactCache.operation == "learning_content",
+            AIArtifactCache.status.in_(("completed", "fallback")),
+        )
+        .order_by(AIArtifactCache.updated_at.desc())
+    ).all()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for artifact in artifacts:
+        if artifact.status == "fallback" and artifact.expires_at and artifact.expires_at <= now:
+            continue
+        if not isinstance(artifact.result_json, dict) or artifact.result_json.get("topic_id") != topic.id:
+            continue
+        try:
+            content = LearningContent.model_validate(artifact.result_json)
+        except ValidationError:
+            logger.warning(
+                "Stored lesson failed validation; learner_id=%s topic_id=%s",
+                learner.id,
+                topic.id,
+            )
+            continue
+        source = "cache" if artifact.status == "completed" else "curated_fallback"
+        return content, source
+    return None
+
+
 def generate_learning_content(
     topic: Topic,
     learner: Learner,
     database: Session,
 ) -> tuple[LearningContent, str]:
     skills = database.scalars(select(SkillScore).where(SkillScore.learner_id == learner.id)).all()
-    weak_concepts = [skill.concept for skill in skills if skill.score < 0.75]
+    weak_records = database.scalars(
+        select(Weakness).where(
+            Weakness.learner_id == learner.id,
+            Weakness.status == "open",
+        )
+    ).all()
+    weak_concepts = list(dict.fromkeys(
+        [weakness.concept for weakness in weak_records]
+        + [skill.concept for skill in skills if skill.score < 0.75]
+    ))
+    strong_concepts = [skill.concept for skill in skills if skill.score >= 0.75]
     progress = database.scalars(
         select(TopicProgress).where(TopicProgress.learner_id == learner.id)
     ).all()
-    completed_topics = [
-        database.get(Topic, item.topic_id).title
-        for item in progress
-        if item.status == "completed" and database.get(Topic, item.topic_id)
-    ]
     prerequisite_topics = database.scalars(
         select(Topic)
         .join(TopicPrerequisite, TopicPrerequisite.prerequisite_id == Topic.id)
         .where(TopicPrerequisite.topic_id == topic.id)
     ).all()
     prerequisites = [item.title for item in prerequisite_topics]
+    course = database.get(GeneratedCourse, topic.course_id) if topic.course_id else None
+    if course is not None and course.learner_id != learner.id:
+        raise ValueError("Learning topic course is not owned by the learner")
+    saved_course_lesson = _previous_course_lesson(topic, learner, database)
+    if saved_course_lesson is not None:
+        content, source = saved_course_lesson
+        return _ensure_structured_lesson(content, topic, weak_concepts), source
+    current_module = next(
+        (
+            module
+            for module in (course.modules_json or [])
+            if topic.id in module.get("topic_ids", [])
+        ),
+        None,
+    ) if course else None
+    course_context = (
+        {
+            "course_id": course.id,
+            "title": course.title,
+            "track_id": course.track_id,
+            "learning_objectives": course.learning_objectives_json[:8],
+            "module": (
+                {
+                    "module_id": current_module.get("module_id"),
+                    "title": current_module.get("title"),
+                    "description": current_module.get("description"),
+                    "order": current_module.get("order"),
+                    "learning_objectives": current_module.get("learning_objectives", []),
+                }
+                if current_module
+                else None
+            ),
+        }
+        if course
+        else None
+    )
+    course_topic_ids = [item.id for item in course.topics] if course else [topic.id]
+    completed_topics = [
+        database.get(Topic, item.topic_id).title
+        for item in progress
+        if item.status == "completed"
+        and item.topic_id in course_topic_ids
+        and database.get(Topic, item.topic_id)
+    ]
     assessments = database.scalars(
         select(Assessment)
-        .where(Assessment.learner_id == learner.id, Assessment.topic_id == topic.id)
+        .where(Assessment.learner_id == learner.id, Assessment.topic_id.in_(course_topic_ids))
         .order_by(Assessment.created_at.desc())
-        .limit(2)
+        .limit(5)
     ).all()
-    recent_assessments = [
-        {"topic_id": item.topic_id, "score": item.score}
-        for item in assessments
-        if item.topic_id and item.score is not None
-    ]
+    recent_assessments = []
+    for assessment in assessments:
+        if not assessment.topic_id or (
+            assessment.score is None and assessment.percentage is None
+        ):
+            continue
+        assessed_topic = database.get(Topic, assessment.topic_id)
+        recent_assessments.append(
+            {
+                "topic": display_topic_title(assessed_topic.title) if assessed_topic else assessment.topic_id,
+                "percentage": assessment.percentage
+                if assessment.percentage is not None
+                else round((assessment.score or 0.0) * 100, 1),
+                "selected_types": assessment.selected_types,
+            }
+        )
     cache_context = {
+        "lesson_schema_version": 3,
         "topic_id": topic.id,
         "topic_description": topic.description,
+        "course": course_context,
         "learner": {
             "experience_level": learner.experience_level,
             "goal": learner.goal_text,
             "target_outcome": learner.target_outcome,
-            "track": learner.track,
+            "track": course.track_id if course else learner.track,
         },
-        "weak_concepts": sorted(weak_concepts),
-        "completed_topics": sorted(item.topic_id for item in progress if item.status == "completed"),
-        "recent_assessments": recent_assessments,
         "prerequisites": prerequisites,
     }
 
@@ -517,9 +1045,11 @@ def generate_learning_content(
                         topic,
                         learner,
                         weak_concepts,
+                        strong_concepts,
                         completed_topics,
                         recent_assessments,
                         prerequisites,
+                        course_context,
                     ),
                     "openrouter",
                 )
@@ -530,7 +1060,7 @@ def generate_learning_content(
                 )
         return _fallback_content(topic, learner, weak_concepts, prerequisites), "curated_fallback"
 
-    return get_or_generate_artifact(
+    content, source = get_or_generate_artifact(
         database,
         learner_id=learner.id,
         operation="learning_content",
@@ -538,4 +1068,9 @@ def generate_learning_content(
         response_model=LearningContent,
         generate=generate,
         fallback=lambda: _fallback_content(topic, learner, weak_concepts, prerequisites),
+        persist_fallback=True,
+    )
+    return (
+        _ensure_structured_lesson(content, topic, weak_concepts),
+        source,
     )

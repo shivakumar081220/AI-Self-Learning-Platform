@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Assessment, GeneratedCourse, Learner, SkillScore, Topic, TopicPrerequisite
-from ..schemas import DiagnosticQuestionSet
+from ..schemas import DiagnosticConceptInsight, DiagnosticQuestionSet, QuestionReviewItem
 from ..topic_titles import display_topic_title
-from ..track_catalog import TRACK_BY_ID
+from ..track_catalog import TRACK_BY_ID, TRACK_CONCEPTS
 from .ai_cache import get_or_generate_artifact
 from .ai_provider import AIProviderError, request_structured_json
 
@@ -155,7 +155,7 @@ def _diagnostic_topic_catalog(
     relevant_global_topics = [
         topic for topic in global_topics if topic.goal_relevance.get(track_id, 0) > 0
     ]
-    if not relevant_global_topics:
+    if not relevant_global_topics and track_id not in TRACK_CONCEPTS:
         relevant_global_topics = global_topics
     owned_topics = database.scalars(
         select(Topic).where(
@@ -176,6 +176,10 @@ def _fallback_questions(
 ) -> DiagnosticQuestionSet:
     catalog = _diagnostic_topic_catalog(database, learner_id, track_id, owner_user_id)
     available_concepts = {concept for topic in catalog for concept in topic.concept_tags}
+    if not _current_course(database, learner_id) and track_id in TRACK_CONCEPTS:
+        available_concepts.update(
+            concept for pair in TRACK_CONCEPTS[track_id] for concept in pair
+        )
     course = _current_course(database, learner_id) if learner_id is not None else None
     if course:
         concepts_by_topic = {
@@ -184,36 +188,79 @@ def _fallback_questions(
         concepts = sorted(available_concepts)
         if len(concepts) < 3:
             raise ValueError("Generated course does not define enough diagnostic concepts")
+        course_objectives = [
+            (topic, objective.strip())
+            for topic in catalog
+            for objective in topic.learning_objectives_json
+            if isinstance(objective, str) and objective.strip()
+        ]
         questions = []
         for index in range(8):
             concept = concepts[index % len(concepts)]
             topic = concepts_by_topic[concept]
+            matching_objectives = [
+                objective
+                for objective_topic, objective in course_objectives
+                if objective_topic.id == topic.id
+            ]
+            correct_answer = (
+                matching_objectives[index % len(matching_objectives)]
+                if matching_objectives
+                else f"Apply {concept.replace('_', ' ')} to a focused example and evaluate the result"
+            )
+            distractors = [
+                objective
+                for objective_topic, objective in course_objectives
+                if objective_topic.id != topic.id and objective != correct_answer
+            ]
+            distractors.extend(
+                [
+                    "Accept an answer without checking it against the task",
+                    "Skip practice and rely on unrelated material",
+                    "Remove constraints before evaluating the result",
+                ]
+            )
+            options = [correct_answer, *dict.fromkeys(distractors)]
+            options = options[:4]
+            correct_option = (index * 3) % len(options)
+            options[0], options[correct_option] = options[correct_option], options[0]
+            difficulties = (
+                "beginner",
+                "intermediate",
+                "intermediate",
+                "advanced",
+                "beginner",
+                "intermediate",
+                "intermediate",
+                "advanced",
+            )
             questions.append(
                 {
                     "id": f"course-{topic.id}-diagnostic-{index + 1}",
                     "question": (
-                        f"Which approach best demonstrates understanding of {concept.replace('_', ' ')} "
-                        f"in {display_topic_title(topic.title)}?"
+                        f"Which outcome best demonstrates {concept.replace('_', ' ')} "
+                        f"while working on {display_topic_title(topic.title)}?"
                     ),
-                    "options": [
-                        f"Apply {concept.replace('_', ' ')} to a focused example and evaluate the result",
-                        "Assume every model output is correct without checking it",
-                        "Skip the concept and rely on unrelated material",
-                        "Remove application constraints and testing",
-                    ],
-                    "correct_option": 0,
+                    "options": options,
+                    "correct_option": correct_option,
                     "concept": concept,
-                    "difficulty": experience_level,
-                    "explanation": topic.description[:500],
+                    "difficulty": difficulties[index],
+                    "explanation": (
+                        f"This course objective is part of {display_topic_title(topic.title)}: "
+                        f"{correct_answer}"
+                    )[:500],
                 }
             )
     elif track_id == "generative_ai":
         questions = [
-            {**question, "difficulty": experience_level}
+            {**question, "options": question["options"].copy(), "difficulty": experience_level}
             for question in CURATED_DIAGNOSTIC_QUESTIONS
             if question["concept"] in available_concepts
         ]
     else:
+        questions = []
+
+    if len(questions) < 8:
         track = TRACK_BY_ID.get(track_id, TRACK_BY_ID["generative_ai"])
         concepts = sorted(available_concepts)[:8]
         if len(concepts) < 3:
@@ -222,6 +269,15 @@ def _fallback_questions(
         for index in range(8):
             concept = concepts[index % len(concepts)]
             readable_concept = concept.replace("_", " ")
+            correct_answer = f"Apply {readable_concept} to a focused example and evaluate the result"
+            options = [
+                correct_answer,
+                "Skip the concept and rely on guesswork",
+                "Treat every result as correct without evaluation",
+                "Avoid practice until the end of the course",
+            ]
+            correct_option = (index * 3 + 1) % len(options)
+            options[0], options[correct_option] = options[correct_option], options[0]
             questions.append(
                 {
                     "id": f"{track_id}-diagnostic-{index + 1}",
@@ -231,13 +287,8 @@ def _fallback_questions(
                         if index % 2 == 0
                         else f"How should you check your understanding of {readable_concept}?"
                     ),
-                    "options": [
-                        f"Apply {readable_concept} to a focused example and evaluate the result",
-                        "Skip the concept and rely on guesswork",
-                        "Treat every result as correct without evaluation",
-                        "Avoid practice until the end of the course",
-                    ],
-                    "correct_option": 0,
+                    "options": options,
+                    "correct_option": correct_option,
                     "concept": concept,
                     "difficulty": experience_level,
                     "explanation": (
@@ -245,16 +296,123 @@ def _fallback_questions(
                     ),
                 }
             )
+    else:
         for index, question in enumerate(questions):
-            if index % 2:
-                question["options"][0], question["options"][1] = (
-                    question["options"][1],
-                    question["options"][0],
-                )
-                question["correct_option"] = 1
+            correct_option = question["correct_option"]
+            target_option = (index * 3 + 1) % len(question["options"])
+            question["options"][correct_option], question["options"][target_option] = (
+                question["options"][target_option],
+                question["options"][correct_option],
+            )
+            question["correct_option"] = target_option
     if experience_level == "advanced":
         questions = questions[1:] + questions[:1]
     return DiagnosticQuestionSet.model_validate({"questions": questions})
+
+
+def build_diagnostic_concept_insights(
+    database: Session,
+    learner: Learner,
+    question_review: list[QuestionReviewItem],
+) -> list[DiagnosticConceptInsight]:
+    topics = _diagnostic_topic_catalog(
+        database, learner.id, learner.track, learner.user_id
+    )
+    topics_by_concept: dict[str, list[Topic]] = {}
+    for topic in topics:
+        for concept in topic.concept_tags:
+            topics_by_concept.setdefault(concept, []).append(topic)
+
+    results: dict[str, list[QuestionReviewItem]] = {}
+    for item in question_review:
+        results.setdefault(item.concept, []).append(item)
+
+    insights = []
+    for concept, items in results.items():
+        correct = sum(item.is_correct for item in items)
+        total = len(items)
+        score = correct / total
+        percentage = round(score * 100)
+        level = "weak" if score < 0.5 else "developing" if score < 0.75 else "strong"
+        matched_topics = topics_by_concept.get(concept, [])
+        topic_titles = list(
+            dict.fromkeys(display_topic_title(topic.title) for topic in matched_topics)
+        )[:5]
+        objectives = list(
+            dict.fromkeys(
+                objective.strip()
+                for topic in matched_topics
+                for objective in topic.learning_objectives_json
+                if isinstance(objective, str) and objective.strip()
+            )
+        )[:3]
+        readable_concept = concept.replace("_", " ")
+
+        if level == "strong":
+            current_strength = (
+                f"You answered {correct} of {total} sampled question(s) correctly for "
+                f"{readable_concept}. This is a positive signal in this diagnostic."
+            )
+            knowledge_gap = (
+                "No clear gap was flagged by these questions. Confirm this foundation with "
+                "a practical task, because a short multiple-choice check is not full proof of mastery."
+            )
+        elif level == "developing":
+            current_strength = (
+                f"You answered {correct} of {total} sampled question(s) correctly, showing "
+                f"some familiarity with {readable_concept}."
+            )
+            knowledge_gap = (
+                f"Your responses were mixed for {readable_concept}; review the related objective(s) "
+                "and practice applying them without hints."
+            )
+        else:
+            current_strength = (
+                f"You answered {correct} of {total} sampled question(s) correctly. Use this as "
+                f"a starting-point signal for {readable_concept}, not as a judgment of your ability."
+            )
+            knowledge_gap = (
+                f"The sampled question(s) did not yet show a reliable understanding of "
+                f"{readable_concept}. Start with the relevant course objective(s) and build up "
+                "through guided practice."
+            )
+
+        improvement_plan = [
+            f"Review {topic_titles[min(index, len(topic_titles) - 1)]}: {objective}"
+            for index, objective in enumerate(objectives)
+        ] if topic_titles else []
+        if not improvement_plan:
+            if any(not item.is_correct for item in items):
+                improvement_plan.append(
+                    f"Revisit the explanation for a missed {readable_concept} question, then explain "
+                    "the correct reasoning in your own words."
+                )
+            else:
+                improvement_plan.append(
+                    f"Choose one {readable_concept} question and explain the correct reasoning in "
+                    "your own words to confirm your understanding."
+                )
+        if any(not item.is_correct for item in items):
+            improvement_plan.append(
+                "Retry the missed question(s) after reviewing, and explain why each distractor is incorrect."
+            )
+        insights.append(
+            DiagnosticConceptInsight(
+                concept=concept,
+                level=level,
+                percentage=percentage,
+                correct_questions=correct,
+                total_questions=total,
+                evidence_statement=(
+                    f"Evidence: {correct} correct out of {total} question(s) tagged to this concept."
+                ),
+                current_strength=current_strength,
+                knowledge_gap=knowledge_gap,
+                improvement_plan=improvement_plan[:5],
+                supporting_topics=topic_titles,
+            )
+        )
+    return sorted(insights, key=lambda insight: (insight.percentage, insight.concept))
 
 
 def _openrouter_questions(learner: Any, database: Session) -> DiagnosticQuestionSet:
@@ -271,6 +429,10 @@ def _openrouter_questions(learner: Any, database: Session) -> DiagnosticQuestion
     for edge in prerequisites:
         prerequisites_by_topic.setdefault(edge.topic_id, []).append(edge.prerequisite_id)
     course = _current_course(database, learner.id)
+    if not course and learner.track in TRACK_CONCEPTS:
+        available_concepts.update(
+            concept for pair in TRACK_CONCEPTS[learner.track] for concept in pair
+        )
     course_topics = [
         {
             "title": display_topic_title(topic.title),
@@ -325,7 +487,11 @@ def _openrouter_questions(learner: Any, database: Session) -> DiagnosticQuestion
         system_prompt=(
             "Create exactly eight rigorous diagnostic multiple-choice questions for the learner's selected AI "
             "track. Use only exact concept identifiers from available_concepts, cover at least three distinct "
-            "concepts from the selected course topics, and use unique question IDs. Each question must have id "
+            "concepts from the selected course topics and distribute questions across concepts as evenly as "
+            "possible. Use a deliberate mix of beginner, intermediate, and advanced difficulty. Questions "
+            "should test application or reasoning where appropriate, not only vocabulary. Include plausible, "
+            "distinct distractors and vary the correct answer position across questions. Use unique question IDs. "
+            "Each question must have id "
             "(string), question (string), options (array of 3 to 5 strings), difficulty (beginner, intermediate, "
             "or advanced), correct_option (zero-based integer within options), concept (exact supplied identifier "
             "string), and explanation (string). These fields are required. "

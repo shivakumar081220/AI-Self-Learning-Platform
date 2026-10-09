@@ -119,6 +119,7 @@ def test_openrouter_client_uses_configured_provider(monkeypatch, database: Sessi
         "api_key": "test-key",
         "base_url": "https://router.example/v1",
         "timeout": settings.openrouter_timeout_seconds,
+        "max_retries": 0,
     }
 
 

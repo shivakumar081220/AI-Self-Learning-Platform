@@ -72,18 +72,13 @@ def _topic_scores(skills: dict[str, SkillScore], topic: Topic) -> dict[str, Any]
 
 
 def _mastered_topic_ids(
-    topics: list[Topic], progress: dict[str, TopicProgress], skills: dict[str, SkillScore]
+    progress: dict[str, TopicProgress],
 ) -> set[str]:
-    mastered = {
+    return {
         topic_id
         for topic_id, record in progress.items()
-        if record.status == "completed" or record.mastery_score >= MASTERY_THRESHOLD
+        if record.status == "completed"
     }
-    for topic in topics:
-        topic_metrics = _topic_scores(skills, topic)
-        if topic_metrics["score"] >= MASTERY_THRESHOLD and topic_metrics["score"] > 0:
-            mastered.add(topic.id)
-    return mastered
 
 
 def _assessment_scores(assessments: list[Assessment]) -> dict[str, float]:
@@ -212,6 +207,7 @@ def generate_path_plan(
     course = database.get(GeneratedCourse, course_id) if course_id is not None else None
     if course_id is not None and (not course or course.learner_id != learner.id):
         raise ValueError("Course does not belong to this learner")
+    course_topic_order: dict[str, int] = {}
     if course:
         topics = database.scalars(
             select(Topic).where(
@@ -226,6 +222,15 @@ def generate_path_plan(
                 TopicPrerequisite.prerequisite_id.in_(topic_ids),
             )
         ).all()
+        course_topic_order = {
+            topic_id: index
+            for index, topic_id in enumerate(
+                topic_id
+                for module in course.modules_json or []
+                for topic_id in module.get("topic_ids", [])
+                if topic_id in topic_ids
+            )
+        }
     elif learner.user_id is not None:
         topics = database.scalars(
             select(Topic).where(
@@ -241,6 +246,7 @@ def generate_path_plan(
             )
         ).all()
     else:
+        course_topic_order = {}
         topics = database.scalars(
             select(Topic).where(Topic.owner_user_id.is_(None), Topic.is_active.is_(True))
         ).all()
@@ -266,7 +272,7 @@ def generate_path_plan(
     recent_scores = _assessment_scores(assessments)
     available_concepts = {concept for topic in topics for concept in topic.concept_tags}
     ai_focus_concepts = _ai_focus_concepts(assessments, available_concepts)
-    mastered = _mastered_topic_ids(topics, progress, skills)
+    mastered = _mastered_topic_ids(progress)
     goal_key = course.track_id if course else _learner_track_key(learner)
     experience_level = course.level if course else learner.experience_level
     goal_text = course.goal if course else learner.goal_text
@@ -298,24 +304,37 @@ def generate_path_plan(
         ]
         if not available:
             raise ValueError("Topic prerequisite graph contains a cycle")
-        selected_id = max(
-            available,
-            key=lambda topic_id: _topic_priority(
-                topic_by_id[topic_id],
-                learner,
-                experience_level,
-                goal_key,
-                skills,
-                recent_scores,
-                downstream_pressure,
-                ai_focus_concepts,
-            ),
-        )
+        if course_topic_order:
+            selected_id = min(
+                available,
+                key=lambda topic_id: course_topic_order.get(topic_id, len(course_topic_order)),
+            )
+        else:
+            selected_id = max(
+                available,
+                key=lambda topic_id: _topic_priority(
+                    topic_by_id[topic_id],
+                    learner,
+                    experience_level,
+                    goal_key,
+                    skills,
+                    recent_scores,
+                    downstream_pressure,
+                    ai_focus_concepts,
+                ),
+            )
         ordered_ids.append(selected_id)
         remaining.remove(selected_id)
 
     topics_json = []
-    for topic in sorted(topics, key=lambda item: item.id):
+    completed_topics = [topic for topic in topics if topic.id in completed_progress_ids]
+    if course_topic_order:
+        completed_topics.sort(
+            key=lambda topic: course_topic_order.get(topic.id, len(course_topic_order))
+        )
+    else:
+        completed_topics.sort(key=lambda item: item.id)
+    for topic in completed_topics:
         if topic.id in completed_progress_ids:
             topics_json.append(
                 {

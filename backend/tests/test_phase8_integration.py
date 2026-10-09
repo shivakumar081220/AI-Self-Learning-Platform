@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
+from app.models import Learner
 from app.seed_topics import seed_topics
-from app.services.diagnostic_service import CURATED_DIAGNOSTIC_QUESTIONS
+from app.services.diagnostic_service import _fallback_questions
 
 
 @pytest.fixture
@@ -19,6 +20,7 @@ def client(tmp_path, monkeypatch) -> Generator[TestClient, None, None]:
     with Session(engine) as database:
         seed_topics(database)
     monkeypatch.setattr(settings, "openrouter_api_key", "")
+    app.state.phase8_engine = engine
 
     def override_get_db() -> Generator[Session, None, None]:
         with Session(engine) as database:
@@ -27,6 +29,8 @@ def client(tmp_path, monkeypatch) -> Generator[TestClient, None, None]:
     app.dependency_overrides[get_db] = override_get_db
     yield TestClient(app)
     app.dependency_overrides.clear()
+    engine.dispose()
+    del app.state.phase8_engine
 
 
 def test_diagnostic_scores_follow_actual_answers(client: TestClient):
@@ -41,7 +45,19 @@ def test_diagnostic_scores_follow_actual_answers(client: TestClient):
     assert learner_response.status_code == 201
     learner_id = learner_response.json()["id"]
 
-    answer_key = {question["id"]: question["correct_option"] for question in CURATED_DIAGNOSTIC_QUESTIONS}
+    with Session(app.state.phase8_engine) as database:
+        learner = database.get(Learner, learner_id)
+        assert learner is not None
+        fallback_questions = _fallback_questions(
+            database,
+            learner.experience_level,
+            learner.user_id,
+            learner.track,
+            learner.id,
+        )
+    answer_key = {
+        question.id: question.correct_option for question in fallback_questions.questions
+    }
 
     mostly_correct_diagram = client.post(f"/api/learners/{learner_id}/diagnostic/generate").json()
     mostly_correct_answers = [

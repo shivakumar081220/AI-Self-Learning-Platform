@@ -1,80 +1,44 @@
-# AI Design Notes
+# AI Design
 
-## Why AI is used
+## What uses AI
 
-OpenRouter supports generated and personalized learning material across the selected AI learning track:
+The backend uses OpenRouter for structured generation where configured:
 
-- Personalized curriculum title, topic structure, objectives, and prerequisites
-- Diagnostic question generation
-- Topic assessment question generation
-- Learning explanations, examples, and analogies
-- Personalized learning content
-- Assessment-result interpretation and remediation guidance
-- Context-aware AI Tutor responses and coding examples
+- Personalized course curricula and diagnostic questions
+- Topic assessment questions and selected subjective-answer evaluations
+- Topic-specific lesson content
+- Tutor responses and assessment interpretation/remediation guidance
 
-The product remains useful without an AI provider: curriculum generation and tutor/remediation guidance have deterministic fallbacks, while diagnostic questions, assessment questions, and learning content have curated fallbacks.
+AI is optional. Provider failures, invalid output, or missing configuration use curated or deterministic fallbacks where available. A feature without a safe fallback returns an explicit error rather than fabricated success.
 
 ## Provider configuration
 
-The backend uses the OpenAI-compatible SDK with environment-driven settings:
+Configure these values in the backend environment or local `.env` file:
 
 ```text
-OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_API_KEY=your_key
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=openrouter/free
 ```
 
-The key is read only by the backend and is never returned to the frontend or written to logs.
+Never commit the key. It is not sent to the browser or included in application logs.
 
-## Context strategy
+## Context, validation, and caching
 
-Prompts receive bounded context from persisted state:
+Each operation receives only the relevant persisted learner and course context, such as experience level, goal, selected track, current topic, completed work, skill evidence, and recent assessment results. Operation-specific Pydantic schemas validate structured responses before they are used. Validators also check identifiers, topic/type membership, required content, and answer privacy where applicable.
 
-- Learner experience level and goal
-- Current persisted learner-curriculum topic metadata
-- Relevant weak concepts
-- Completed topics
-- Recent assessment scores
-
-The prompt tells the model to stay within the supplied topic and curriculum. It does not receive authority to change learner state.
-
-## Structured output and validation
-
-Generated curricula, diagnostic and assessment questions, learning content, tutor responses, and remediation guidance are represented by Pydantic schemas. The backend validates:
-
-- Required fields and lengths
-- Question option indexes
-- Unique question IDs
-- Minimum concept coverage
-- Topic and concept membership
-- Exact requested topic ID and title for learning content
-
-Invalid output is rejected and replaced with curated content or deterministic guidance, according to the feature.
+Reusable generated curricula, lessons, and assessments are persisted and loaded again when the relevant context matches. Tutor responses are tied to live conversation turns and are not response-cached.
 
 ## Deterministic responsibilities
 
-Authentication, password verification, JWT validation, ownership authorization, and database access are deterministic application concerns. AI is never used for security decisions.
+The model does not control authentication, ownership, answer privacy, score calculation for objectively graded items, skill persistence, weakness status, topic completion, prerequisite enforcement, or database writes. These remain application decisions.
 
-Application logic, not the model, controls:
+The adaptive engine uses saved assessment and skill evidence. Generated content may inform the learner-facing explanation or interpretation, but it cannot grant access, mark work complete, or override prerequisite order.
 
-- MCQ scoring
-- Concept-level scores
-- Historical skill updates
-- Weakness thresholds and resolution
-- Topic progress
-- Prerequisite enforcement
-- Path ranking and current position
-- Recommendation category
-- Database writes and ownership checks
+Topic skill scores use the latest result directly on the first observation and `0.6 * previous_score + 0.4 * latest_score` thereafter. The current bands are weak below 50%, developing from 50% to below 80%, and strong at 80% or above.
 
-Generated courses are validated and persisted once during onboarding. Later sessions load the same course rather than regenerating it on every refresh.
+## Reliability and limits
 
-Topic assessment skill updates use `0.6 * previous_score + 0.4 * latest_score` after the first observation. Weak, developing, and strong thresholds are `<50%`, `50-79%`, and `>=80%`.
+Provider requests use bounded retries. Invalid or unavailable output is rejected and handled by the operation's curated/deterministic fallback. Provider logs record operational metadata, not prompt bodies, response bodies, credentials, or learner identifiers.
 
-## Failure behavior
-
-Missing API keys, provider errors, rate limits, network failures, empty responses, and malformed structured output use the appropriate curated or deterministic fallback. Automated tests mock the provider and never make real OpenRouter requests.
-
-## Limitations
-
-The MVP supports eight AI learning tracks and MCQ assessments. Tutor responses are limited to supplied learner and topic context; retrieval over external documents, refresh-token rotation, httpOnly cookie sessions, and additional question formats are future work. Free-model output quality can vary, which is why the application validates output and maintains deterministic or curated fallback material.
+Schema validation guarantees structure, not factual correctness. AI-generated educational explanations can still be wrong. Automated tests mock OpenRouter; only an explicitly enabled live smoke test makes a real provider request. Code execution for coding assessments requires the separately configured sandbox.

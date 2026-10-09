@@ -1,23 +1,31 @@
 # AI Call Map
 
-All calls use `request_structured_json` in `backend/app/services/ai_provider.py`, which submits strict JSON Schema output and then validates the parsed payload against the operation's Pydantic model. The configured model is selected by `OPENROUTER_MODEL`; no credential is documented here. The provider timeout comes from `OPENROUTER_TIMEOUT_SECONDS` (default 30 seconds).
+AI-backed services use `request_structured_json` from `backend/app/services/ai_provider.py`. The helper sends schema-constrained requests to the configured OpenRouter model and validates the parsed result against a Pydantic model. Operations run lazily when the learner reaches the relevant action.
 
-| Operation | Source / function | Trigger | Context sent (compact, private data excluded) | Response schema | Max tokens | Cache / deduplication | Fallback / timing |
-|---|---|---|---|---|---:|---|---|
-| `curriculum_generation` | `services/curriculum_service.py::_openrouter_curriculum` via `generate_curriculum` | `POST /api/curriculum/generate` after profile enrollment | Goal, target outcome, experience, track, relevant skill/weakness and recent assessment state, completed topics, relevant curriculum catalog and prerequisite guidance | `GeneratedCurriculum` (`course_title`, description, course objectives, ordered topics, objectives, difficulty, prerequisites, minutes) | 2,400 | Existing matching `GeneratedCourse` is returned; profile/track changes produce a new personalized course and archive prior topics | `_fallback_curriculum`; provider timing event; call is blocking at enrollment |
-| `diagnostic_questions` | `services/diagnostic_service.py::_openrouter_questions` via `generate_diagnostic` | `POST /api/learners/{id}/diagnostic` | Selected generated course topics/concepts/prerequisites plus experience, goal, weak concepts and prior diagnostic evidence | `DiagnosticQuestionSet` (exactly eight; internal answer key remains server-side; includes concept and difficulty) | 3,200 | Durable `AIArtifactCache` keyed by course/profile/skill/previous diagnostic state; pending assessment reused | `_fallback_questions`; deterministic score; lazy/blocking at diagnostic start |
-| `learning_content` | `services/content_service.py::_openrouter_content` via `generate_learning_content` | `GET /api/learners/{id}/topics/{topic_id}/content` | Current topic, learner level/goal, a compact weak/completed/recent-topic-assessment context, prerequisites | `LearningContent` | 2,600 | Durable `AIArtifactCache` keyed by current topic and relevant learner state; pending row prevents equivalent simultaneous calls; fallback cache expires after 60 seconds | `_fallback_content`; lazy/blocking at topic open |
-| `topic_assessment_questions` | `services/assessment_service.py::_openrouter_questions` via `generate_assessment_questions` | `POST /api/learners/{id}/topics/{topic_id}/assessment/generate` after topic completion | Current topic/concepts/difficulty, learner level/goal, weak concepts, prior questions for that topic | `AssessmentQuestionSet` (3–8 MCQs; answer key stays server-side) | 1,400 | Durable artifact key includes topic/profile/weak concepts and previous-question fingerprints; pending assessment reused | `_fallback_questions`; deterministic scoring; lazy/blocking after topic completion |
-| `learning_interpretation` | `services/learning_ai_service.py::interpret_skill_results` | After deterministic diagnostic scoring is committed | Percentage, strong/developing/weak concept IDs, goal, level, track | `LearningInterpretation` | 1,200 | Result persisted in the diagnostic `Assessment.feedback_json`; completed submission cannot be re-scored | Deterministic interpretation; lazy/blocking immediately after diagnostic submit |
-| `learning_remediation` | `services/learning_ai_service.py::generate_remediation_aid` | After topic assessment identifies weak concepts | Current topic, weak concepts, deterministic percentage/remediation context, learner goal/level | `RemediationAid` | 1,200 | Persisted in that assessment's feedback; submission is not repeated after completion | Deterministic targeted remediation; conditional/lazy after weak result |
-| `tutor_response` | `services/tutor_service.py::_openrouter_answer` | Explicit tutor question from the learner | Current topic, question, level/goal, weak concepts, compact course context | `TutorAnswer` | 1,400 | No persistent answer cache | Deterministic tutor fallback; lazy/blocking per learner question |
+| Operation | Service | Trigger | Context (summary) | Output / fallback |
+|---|---|---|---|---|
+| Curriculum | `curriculum_service.generate_curriculum` | Course enrollment or explicit curriculum generation | Selected track, goal, level, skill and assessment evidence, completed topics, prerequisites | Validated ordered curriculum; track-specific deterministic fallback |
+| Diagnostic questions | `diagnostic_service.generate_diagnostic` | Start diagnostic | Learner profile, course concepts, prior diagnostic evidence | Validated question set; curated questions |
+| Diagnostic interpretation | `learning_ai_service.interpret_skill_results` | After deterministic diagnostic scoring | Score, concept evidence, goal, level, track | Structured interpretation; deterministic interpretation |
+| Topic lesson | `content_service.generate_learning_content` | Open a topic | Course/module/topic objectives, learner level, strengths/gaps, completed topics, recent course assessments | Validated lesson; curated topic-specific lesson |
+| Legacy topic MCQs | `assessment_service.generate_assessment_questions` | Legacy MCQ generation route | Topic concepts, level, weak areas, prior topic questions | Validated MCQ set; curated MCQs |
+| Multi-type assessment | `multi_type_assessment_service.generate_assessment` | Learner selects assessment types | Track/course/topic, learner context, selected types, completed work | Validated selected question types; curated fallback |
+| Subjective answer evaluation | `multi_type_assessment_service.evaluate_open_responses` | Submit multi-type assessment with open responses | Topic concepts, learner context, answers, server-only rubric and expected concepts | Grouped structured scores/feedback; deterministic evaluation fallback |
+| Remediation guidance | `learning_ai_service.generate_remediation_aid` | Assessment identifies weak evidence | Result, weak concepts, topic, learner goal and level | Targeted structured guidance; deterministic remediation |
+| Tutor response | `tutor_conversation_service.generate_tutor_response` | Learner sends a tutor turn | Current course/module/topic, lesson section, skill state, recent assessments, bounded conversation | Structured contextual reply; deterministic tutor response |
 
-Path generation is not a separate AI operation. It reuses the latest schema-validated OpenRouter diagnostic `focus_concepts` when available; fallback interpretation is not attributed to AI. `services/path_engine.py::generate_path_plan` then deterministically validates topics, applies prerequisite ordering, and combines that focus with persisted skills, goal, experience, progress, and assessment history.
+## Other execution
 
-## Retry contract
+Code Output, Coding, and Debugging assessment tasks use a batched request to the configured `CODE_SANDBOX_URL`; this is not an OpenRouter call. FastAPI does not execute learner code. If the sandbox is not configured, the code-bearing submission fails explicitly and is not marked complete.
 
-The provider makes at most two total HTTP attempts: the original request plus one retry. Schema-invalid/empty output gets one correction attempt. HTTP 429 and 5xx may get one delayed retry using `Retry-After` (or a one-second default), capped at five seconds. Other failures are not retried. Invalid output is never returned as successful AI data and is not persisted by artifact generators.
+Browser speech recognition and synthesis use browser APIs. Speech transcripts are submitted as regular tutor messages; raw audio is not stored by the application.
 
-## Timing telemetry
+## Reuse and retries
 
-Each provider call emits `ai_operation`, UTC `started_at`, `duration_ms`, `status`, `source`, `model`, `http_status`, and `validation_status`. Cache hits/fallback cache results emit the same operation/timing fields with their actual source. Logs omit request payloads, response bodies, credentials, and learner identifiers.
+Curricula, lesson content, and assessment generation use persisted context-aware artifacts or matching pending assessments where applicable. Tutor responses are not cached because they depend on the current conversation turn.
+
+The provider permits at most one retry per operation, for a maximum of two HTTP attempts. Transient HTTP failures honor a bounded `Retry-After`; invalid structured output may be corrected once. No retry behavior is a guarantee of provider availability.
+
+## Telemetry
+
+Provider events include operation, start time, duration, source, model, status, HTTP status, and validation status. Cache/fallback outcomes are identifiable. Prompts, response bodies, credentials, and learner identifiers are excluded.

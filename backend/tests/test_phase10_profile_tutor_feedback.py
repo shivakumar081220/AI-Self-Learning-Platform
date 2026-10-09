@@ -117,9 +117,12 @@ def test_diagnostic_question_feedback_can_be_reloaded(phase10_context):
         },
     )
     assert submitted.status_code == 200, submitted.text
-    assert len(submitted.json()["question_review"]) == len(assessment["questions"])
-    assert submitted.json()["ai_interpretation"]["source"] == "deterministic_fallback"
-    assert str(submitted.json()["overall_percentage"]) in submitted.json()["ai_interpretation"]["summary"]
+    submitted_body = submitted.json()
+    assert len(submitted_body["question_review"]) == len(assessment["questions"])
+    assert submitted_body["ai_interpretation"]["source"] == "deterministic_fallback"
+    assert str(submitted_body["overall_percentage"]) in submitted_body["ai_interpretation"]["summary"]
+    assert submitted_body["concept_insights"]
+    assert all(insight["improvement_plan"] for insight in submitted_body["concept_insights"])
     summary = client.get(f"/api/learners/{learner_id}/summary", headers=headers)
     assert summary.status_code == 200
     assert summary.json()["latest_assessment"]["topic_id"] is None
@@ -138,6 +141,7 @@ def test_diagnostic_question_feedback_can_be_reloaded(phase10_context):
     assert reloaded.status_code == 200, reloaded.text
     assert reloaded.json()["question_review"] == submitted.json()["question_review"]
     assert reloaded.json()["ai_interpretation"] == submitted.json()["ai_interpretation"]
+    assert reloaded.json()["concept_insights"] == submitted_body["concept_insights"]
 
 
 def test_tutor_rejects_another_learners_generated_topic(phase10_context):

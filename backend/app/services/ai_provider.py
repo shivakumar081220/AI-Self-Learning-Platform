@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -6,7 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import TypeVar
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel, ValidationError
 
 from ..config import settings
@@ -18,6 +19,22 @@ ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
 class AIProviderError(RuntimeError):
     pass
+
+
+def _request_with_hard_timeout(
+    client_kwargs: dict,
+    request_kwargs: dict,
+    timeout_seconds: float,
+) -> tuple[int, object]:
+    async def send_request() -> tuple[int, object]:
+        async with AsyncOpenAI(**client_kwargs) as client:
+            raw_response = await asyncio.wait_for(
+                client.chat.completions.with_raw_response.create(**request_kwargs),
+                timeout=timeout_seconds,
+            )
+            return raw_response.status_code, await raw_response.parse()
+
+    return asyncio.run(send_request())
 
 
 def _validation_diagnostics(error: ValidationError) -> tuple[list[str], list[str], list[str]]:
@@ -125,12 +142,24 @@ def request_structured_json(
     response_model: type[ResponseModel],
     temperature: float = 0.2,
     max_tokens: int = 1600,
+    timeout_seconds: float | None = None,
+    hard_timeout_seconds: float | None = None,
+    retry_on_failure: bool = True,
 ) -> ResponseModel:
     started_at = datetime.now(timezone.utc).isoformat()
     started_clock = time.monotonic()
     http_status: int | None = None
     validation_status = "not_run"
     operation_status = "failure"
+    request_timeout = (
+        settings.openrouter_timeout_seconds
+        if timeout_seconds is None
+        else timeout_seconds
+    )
+    if request_timeout <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    if hard_timeout_seconds is not None and hard_timeout_seconds <= 0:
+        raise ValueError("hard_timeout_seconds must be positive")
     if not settings.openrouter_api_key:
         _log_operation(
             operation=operation,
@@ -143,12 +172,16 @@ def request_structured_json(
         )
         raise AIProviderError("OpenRouter is not configured")
 
+    client_kwargs = {
+        "api_key": settings.openrouter_api_key,
+        "base_url": settings.openrouter_base_url,
+        "timeout": request_timeout,
+        "max_retries": 0,
+    }
+    client = None
     try:
-        client = OpenAI(
-            api_key=settings.openrouter_api_key,
-            base_url=settings.openrouter_base_url,
-            timeout=settings.openrouter_timeout_seconds,
-        )
+        if hard_timeout_seconds is None:
+            client = OpenAI(**client_kwargs)
     except Exception as error:
         logger.warning(
             "OpenRouter client initialization failed; operation=%s model=%s http_status=None "
@@ -177,32 +210,45 @@ def request_structured_json(
             "Include every required property, omit every unsupported property, and satisfy all constraints. "
             f"JSON schema: {json.dumps(schema, ensure_ascii=True, separators=(',', ':'))}"
         )
-        for attempt in (1, 2):
+        attempt_limit = 2 if retry_on_failure else 1
+        for attempt in range(1, attempt_limit + 1):
             attempt_prompt = structured_prompt
             if attempt == 2:
                 attempt_prompt += (
                     "\nThis is the single retry. Return a corrected JSON object only."
                 )
-            try:
-                raw_response = client.chat.completions.with_raw_response.create(
-                    model=settings.openrouter_model,
-                    temperature=temperature if attempt == 1 else 0,
-                    max_tokens=max_tokens,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": operation,
-                            "strict": True,
-                            "schema": schema,
-                        },
+            request_kwargs = {
+                "model": settings.openrouter_model,
+                "temperature": temperature if attempt == 1 else 0,
+                "max_tokens": max_tokens,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": operation,
+                        "strict": True,
+                        "schema": schema,
                     },
-                    messages=[
-                        {"role": "system", "content": attempt_prompt},
-                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=True)},
-                    ],
-                )
-                http_status = raw_response.status_code
-                response = raw_response.parse()
+                },
+                "messages": [
+                    {"role": "system", "content": attempt_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=True)},
+                ],
+            }
+            try:
+                if hard_timeout_seconds is not None:
+                    http_status, response = _request_with_hard_timeout(
+                        client_kwargs,
+                        request_kwargs,
+                        hard_timeout_seconds,
+                    )
+                else:
+                    if client is None:
+                        raise AIProviderError("OpenRouter client is unavailable")
+                    raw_response = client.chat.completions.with_raw_response.create(
+                        **request_kwargs
+                    )
+                    http_status = raw_response.status_code
+                    response = raw_response.parse()
             except Exception as error:
                 http_status = _response_status(error)
                 transient = http_status == 429 or (http_status is not None and 500 <= http_status < 600)
@@ -215,7 +261,7 @@ def request_structured_json(
                     attempt,
                     type(error).__name__,
                 )
-                if transient and attempt == 1:
+                if transient and attempt < attempt_limit:
                     time.sleep(_retry_delay(error))
                     continue
                 raise AIProviderError("OpenRouter request failed") from None
@@ -239,7 +285,7 @@ def request_structured_json(
                     len(getattr(message, "tool_calls", None) or []),
                     "truncated_generation" if finish_reason == "length" else "empty_content",
                 )
-                if attempt == 1:
+                if attempt < attempt_limit:
                     continue
                 validation_status = "failed"
                 raise AIProviderError("OpenRouter returned empty structured content")
@@ -275,7 +321,7 @@ def request_structured_json(
                     error.lineno,
                     error.colno,
                 )
-                if attempt == 1:
+                if attempt < attempt_limit:
                     continue
                 validation_status = "failed"
                 raise AIProviderError("OpenRouter returned malformed JSON") from None
@@ -296,7 +342,7 @@ def request_structured_json(
                     missing,
                     unexpected,
                 )
-                if attempt == 1:
+                if attempt < attempt_limit:
                     continue
                 validation_status = "failed"
                 raise
@@ -306,7 +352,7 @@ def request_structured_json(
             return result
 
         validation_status = "failed"
-        raise AIProviderError("OpenRouter structured response failed after retry")
+        raise AIProviderError("OpenRouter structured response failed")
     finally:
         _log_operation(
             operation=operation,

@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import GeneratedCourse, Learner, LearningPath, Topic, TopicProgress
+from ..models import Assessment, GeneratedCourse, Learner, LearningPath, Topic, TopicProgress
 from ..schemas import LearningPathResponse
 from ..services.path_engine import generate_path_plan, path_response, validate_path_payload
 from ..models import User
@@ -32,7 +32,7 @@ def _serialize_path(path: LearningPath, database: Session) -> LearningPathRespon
     topics = payload["topics"]
     for index, topic in enumerate(topics):
         record = progress.get(topic["topic_id"])
-        if record and (record.status == "completed" or record.mastery_score >= 0.8):
+        if record and record.status == "completed":
             topic["status"] = "completed"
         elif record and record.status == "remediation":
             topic["status"] = "remediation"
@@ -41,6 +41,23 @@ def _serialize_path(path: LearningPath, database: Session) -> LearningPathRespon
         if index == path.current_index and topic["status"] != "completed":
             topic["status"] = "current"
     payload["topics"] = topics
+    topic_ids = [item.get("topic_id") for item in path.path_json if item.get("topic_id")]
+    pending_assessments = database.scalars(
+        select(Assessment).where(
+            Assessment.learner_id == path.learner_id,
+            Assessment.topic_id.in_(topic_ids),
+            Assessment.assessment_type == "topic",
+            Assessment.status == "pending",
+        )
+    ).all() if topic_ids else []
+    payload["pending_assessments"] = [
+        {
+            "assessment_id": assessment.id,
+            "topic_id": assessment.topic_id,
+            "selected_types": assessment.selected_types or ["mcq"],
+        }
+        for assessment in pending_assessments
+    ]
     return LearningPathResponse.model_validate(payload)
 
 

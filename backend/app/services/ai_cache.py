@@ -52,6 +52,7 @@ def get_or_generate_artifact(
     response_model: type[ResponseModel],
     generate: Callable[[], tuple[ResponseModel, str]],
     fallback: Callable[[], ResponseModel],
+    persist_fallback: bool = False,
 ) -> tuple[ResponseModel, str]:
     key_material = json.dumps(key_context, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     cache_key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
@@ -68,7 +69,11 @@ def get_or_generate_artifact(
             )
         )
         if artifact and artifact.status in {"completed", "fallback"}:
-            if artifact.status == "completed" or (artifact.expires_at and artifact.expires_at > now):
+            if (
+                artifact.status == "completed"
+                or artifact.expires_at is None
+                or artifact.expires_at > now
+            ):
                 try:
                     cached = response_model.model_validate(artifact.result_json)
                 except ValidationError:
@@ -136,7 +141,9 @@ def get_or_generate_artifact(
             artifact.source = source
             artifact.result_json = validated_result.model_dump(mode="json")
             artifact.expires_at = (
-                None if is_ai_result else datetime.utcnow() + timedelta(seconds=_FALLBACK_CACHE_SECONDS)
+                None
+                if is_ai_result or persist_fallback
+                else datetime.utcnow() + timedelta(seconds=_FALLBACK_CACHE_SECONDS)
             )
             artifact.updated_at = datetime.utcnow()
             database.commit()

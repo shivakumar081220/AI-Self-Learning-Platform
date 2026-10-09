@@ -78,6 +78,65 @@ AI_TRACKS = [
 
 TRACK_BY_ID = {track.id: track for track in AI_TRACKS}
 
+TRACK_CONCEPTS = {
+    "python_for_ai": [
+        ("python_syntax", "variables_and_types"),
+        ("functions", "control_flow"),
+        ("data_structures", "data_cleaning"),
+        ("numerical_computing", "feature_preparation"),
+        ("reproducible_scripts", "dataset_pipelines"),
+    ],
+    "machine_learning": [
+        ("training_data", "feature_engineering"),
+        ("supervised_learning", "classification"),
+        ("loss_functions", "model_optimization"),
+        ("validation_sets", "overfitting"),
+        ("evaluation_metrics", "error_analysis"),
+    ],
+    "deep_learning": [
+        ("tensors", "neural_network_layers"),
+        ("forward_pass", "activation_functions"),
+        ("backpropagation", "gradient_descent"),
+        ("regularization", "generalization"),
+        ("training_loops", "model_evaluation"),
+    ],
+    "nlp": [
+        ("text_normalization", "tokenization"),
+        ("bag_of_words", "tf_idf"),
+        ("text_classification", "sequence_labeling"),
+        ("word_embeddings", "language_models"),
+        ("precision_recall", "nlp_evaluation"),
+    ],
+    "generative_ai": [
+        ("prompt_design", "context"),
+        ("constraints", "structured_outputs"),
+        ("generation_parameters", "sampling"),
+        ("grounding", "guardrails"),
+        ("quality_metrics", "safety_evaluation"),
+    ],
+    "llms": [
+        ("tokens", "context_windows"),
+        ("transformers", "attention"),
+        ("inference", "decoding"),
+        ("structured_generation", "tool_calling"),
+        ("latency", "model_evaluation"),
+    ],
+    "rag": [
+        ("document_chunking", "metadata"),
+        ("embeddings", "vector_search"),
+        ("retrieval_ranking", "hybrid_search"),
+        ("grounded_generation", "citations"),
+        ("retrieval_metrics", "answer_faithfulness"),
+    ],
+    "ai_agents": [
+        ("tool_schemas", "argument_validation"),
+        ("task_decomposition", "planning"),
+        ("state_management", "orchestration"),
+        ("permissions", "guardrails"),
+        ("trajectory_evaluation", "agent_reliability"),
+    ],
+}
+
 LEGACY_GOAL_TRACK = {
     "llm_apps": "generative_ai",
     "prompt_engineering": "generative_ai",

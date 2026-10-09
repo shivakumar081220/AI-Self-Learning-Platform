@@ -78,6 +78,39 @@ def fallback_content(topic_id: str, title: str) -> str:
             "real_world_example": data["practical_example"],
             "practice_suggestion": "Explain the idea and test it with one example.",
             "prerequisites": [],
+            "introduction": data["overview"],
+            "why_it_matters": data["practical_example"],
+            "sections": [
+                {
+                    "title": "Core ideas",
+                    "summary": data["explanation"],
+                    "subsections": [
+                        {
+                            "title": data["key_concepts"][0],
+                            "explanation": data["explanation"],
+                            "key_points": data["quick_recap"][:2],
+                            "examples": data["examples"][:1],
+                            "practical_application": data["practical_example"],
+                            "tutor_prompts": ["Explain the idea", "Show an example"],
+                        }
+                    ],
+                }
+            ],
+            "common_mistake_details": [
+                {
+                    "mistake": data["common_mistakes"][0],
+                    "explanation": data["explanation"],
+                    "correction": data["practical_example"],
+                }
+            ],
+            "key_takeaways": data["quick_recap"][:2],
+            "self_check": [
+                {
+                    "question": f"How does {title} apply to a real task?",
+                    "hint": data["practical_example"],
+                }
+            ],
+            "assessment_recommendation": "Explain the concept, then apply it to a new example.",
             "coding_example": {
                 "title": "Inspect a message",
                 "code": "message = {'role': 'user'}\nprint(message['role'])",
@@ -110,9 +143,18 @@ def test_valid_topic_returns_curated_fallback_and_starts_progress(client: TestCl
     assert response.status_code == 200
     assert response.json()["source"] == "curated_fallback"
     assert response.json()["content"]["topic_id"] == path["current_topic_id"]
-    if "ai" in path["topics"][path["current_index"]]["title"].lower():
-        assert response.json()["content"]["coding_example"]["code"]
-        assert response.json()["content"]["practice_suggestion"]
+    content = response.json()["content"]
+    assert content["title"]
+    assert content["introduction"]
+    assert content["why_it_matters"]
+    assert content["sections"]
+    assert all(section["subsections"] for section in content["sections"])
+    assert content["common_mistake_details"]
+    assert content["key_takeaways"]
+    assert content["self_check"]
+    assert content["assessment_recommendation"]
+    assert response.json()["content"]["sections"][0]["subsections"][0]["examples"]
+    assert response.json()["content"]["practice_suggestion"]
     with Session(app.state.phase6_test_engine) as database:
         progress = database.scalar(
             select(TopicProgress).where(
@@ -223,9 +265,10 @@ def test_completion_persists_and_repeated_completion_is_safe(client: TestClient)
                 TopicProgress.learner_id == learner["id"], TopicProgress.topic_id == topic_id
             )
         )
-        assert progress.status == "completed"
+        assert progress.status == "in_progress"
+        assert progress.lesson_completed is True
         assert progress.mastery_score == 0
         stored_path = database.scalar(
             select(LearningPath).where(LearningPath.learner_id == learner["id"])
         )
-        assert stored_path.current_index >= 1
+        assert stored_path.current_index == 0

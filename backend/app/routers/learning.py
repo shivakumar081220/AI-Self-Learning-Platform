@@ -49,6 +49,21 @@ def _current_item(path: LearningPath) -> tuple[dict, int] | None:
     return path.path_json[path.current_index], path.current_index
 
 
+def _module_context(course: GeneratedCourse | None, topic_id: str) -> dict:
+    if course is None:
+        return {}
+    for module in course.modules_json or []:
+        if topic_id in module.get("topic_ids", []):
+            return {
+                "module_id": module.get("module_id"),
+                "module_title": module.get("title"),
+                "module_order": module.get("order"),
+                "module_description": module.get("description"),
+                "module_learning_objectives": module.get("learning_objectives", []),
+            }
+    return {}
+
+
 def _progress_record(
     learner_id: int, topic_id: str, database: Session, create: bool = False
 ) -> TopicProgress | None:
@@ -96,6 +111,7 @@ def _authorize_topic(
 def get_current_topic(
     learner_id: int,
     course_id: int | None = None,
+    topic_id: str | None = None,
     database: Session = Depends(get_db),
     user: User | None = Depends(get_optional_user),
 ) -> CurrentTopicResponse:
@@ -104,21 +120,29 @@ def get_current_topic(
         raise HTTPException(status_code=404, detail="Learner not found")
     ensure_learner_access(learner, user)
     path = _latest_path(learner_id, database, course_id)
-    current = _current_item(path)
-    if not current:
-        raise HTTPException(status_code=404, detail="Learner has completed the current learning path")
-    item, index = current
-    topic = database.get(Topic, item["topic_id"])
+    if topic_id:
+        _, topic, progress, item = _authorize_topic(
+            learner_id, topic_id, path, database, user
+        )
+        _, index = _path_topic(path, topic_id)
+    else:
+        current = _current_item(path)
+        if not current:
+            raise HTTPException(status_code=404, detail="Learner has completed the current learning path")
+        item, index = current
+        topic = database.get(Topic, item["topic_id"])
+        progress = _progress_record(learner_id, topic.id, database) if topic else None
     if not topic:
         raise HTTPException(status_code=500, detail="Stored path references an unavailable topic")
     course = database.get(GeneratedCourse, topic.course_id) if topic.course_id else None
-    progress = _progress_record(learner_id, topic.id, database)
     return CurrentTopicResponse(
         learner_id=learner_id,
         topic_id=topic.id,
         title=display_topic_title(topic.title),
         course_id=topic.course_id,
+        track_id=course.track_id if course else topic.track_id,
         course_title=course.title if course else None,
+        **_module_context(course, topic.id),
         difficulty=topic.difficulty,
         position=index + 1,
         total_topics=len(path.path_json),
@@ -169,53 +193,24 @@ def complete_topic(
     path = _path_for_topic(learner_id, topic_id, database)
     learner, topic, progress, path_item = _authorize_topic(learner_id, topic_id, path, database, user)
     progress = progress or _progress_record(learner_id, topic_id, database, create=True)
-    progress.status = "completed"
+    progress.lesson_completed = True
+    if progress.status != "completed":
+        progress.status = "in_progress"
     progress.last_activity_at = datetime.utcnow()
-    path_item["status"] = "completed"
-
-    next_index = path.current_index
-    while next_index < len(path.path_json) and path.path_json[next_index].get("topic_id") != topic_id:
-        next_index += 1
-    if next_index < len(path.path_json):
-        next_index += 1
-    while next_index < len(path.path_json):
-        next_progress = _progress_record(learner_id, path.path_json[next_index]["topic_id"], database)
-        if not next_progress or next_progress.status != "completed":
-            break
-        next_index += 1
-    path.current_index = next_index
-    path.path_json = list(path.path_json)
     database.commit()
-    current = _current_item(path)
-    if not current:
-        course = database.get(GeneratedCourse, topic.course_id) if topic.course_id else None
-        return CurrentTopicResponse(
-            learner_id=learner.id,
-            topic_id=topic.id,
-            title=display_topic_title(topic.title),
-            course_id=topic.course_id,
-            course_title=course.title if course else None,
-            difficulty=topic.difficulty,
-            position=len(path.path_json),
-            total_topics=len(path.path_json),
-            status="completed",
-            prerequisites=path_item.get("prerequisites", []),
-        )
-    next_item, current_index = current
-    next_topic = database.get(Topic, next_item["topic_id"])
-    next_course = (
-        database.get(GeneratedCourse, next_topic.course_id) if next_topic.course_id else None
-    )
-    next_progress = _progress_record(learner_id, next_topic.id, database)
+    _, current_index = _path_topic(path, topic_id)
+    course = database.get(GeneratedCourse, topic.course_id) if topic.course_id else None
     return CurrentTopicResponse(
         learner_id=learner.id,
-        topic_id=next_topic.id,
-        title=display_topic_title(next_topic.title),
-        course_id=next_topic.course_id,
-        course_title=next_course.title if next_course else None,
-        difficulty=next_topic.difficulty,
+        topic_id=topic.id,
+        title=display_topic_title(topic.title),
+        course_id=topic.course_id,
+        track_id=course.track_id if course else topic.track_id,
+        course_title=course.title if course else None,
+        **_module_context(course, topic.id),
+        difficulty=topic.difficulty,
         position=current_index + 1,
         total_topics=len(path.path_json),
-        status=next_progress.status if next_progress else "pending",
-        prerequisites=next_item.get("prerequisites", []),
+        status=progress.status,
+        prerequisites=path_item.get("prerequisites", []),
     )

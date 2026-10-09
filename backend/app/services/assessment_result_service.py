@@ -243,6 +243,10 @@ def apply_assessment_result(
     percentage = round((correct_count / total_questions) * 100, 1)
     assessment.answers_json = stored_answers
     assessment.score = correct_count / total_questions
+    assessment.status = "completed"
+    assessment.total_points = total_questions
+    assessment.earned_points = float(correct_count)
+    assessment.percentage = percentage
     assessment.completed_at = datetime.utcnow()
 
     concept_results: list[ConceptResult] = []

@@ -2,7 +2,7 @@ from datetime import datetime
 
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -35,6 +35,7 @@ class GeneratedCourse(Base):
     level: Mapped[str] = mapped_column(String(30))
     estimated_duration: Mapped[str] = mapped_column(String(80))
     learning_objectives_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    modules_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     track_id: Mapped[str] = mapped_column(String(50), default="generative_ai")
     track_history_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     generation_source: Mapped[str] = mapped_column(String(30), default="unknown")
@@ -211,6 +212,7 @@ class TopicProgress(Base):
     learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id"), index=True)
     topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id"), index=True)
     status: Mapped[str] = mapped_column(String(30), default="pending")
+    lesson_completed: Mapped[bool] = mapped_column(Boolean, default=False)
     mastery_score: Mapped[float] = mapped_column(Float, default=0.0)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -229,12 +231,62 @@ class Assessment(Base):
     questions_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     answers_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     feedback_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    selected_types: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["mcq"])
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    total_points: Mapped[int] = mapped_column(Integer, default=0)
+    earned_points: Mapped[float] = mapped_column(Float, default=0.0)
+    percentage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    assessment_version: Mapped[str] = mapped_column(String(40), default="multi-type-v1")
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     learner: Mapped[Learner] = relationship(back_populates="assessments")
     topic: Mapped[Topic | None] = relationship(back_populates="assessments")
+    questions: Mapped[list["AssessmentQuestionRecord"]] = relationship(
+        back_populates="assessment", cascade="all, delete-orphan"
+    )
+
+
+class AssessmentQuestionRecord(Base):
+    __tablename__ = "assessment_questions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assessment_id: Mapped[int] = mapped_column(ForeignKey("assessments.id"), index=True)
+    question_id: Mapped[str] = mapped_column(String(80))
+    question_type: Mapped[str] = mapped_column(String(30), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    concept: Mapped[str] = mapped_column(String(100))
+    difficulty: Mapped[str] = mapped_column(String(30))
+    points: Mapped[int] = mapped_column(Integer, default=1)
+    options_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    starter_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evaluation_data_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    assessment: Mapped[Assessment] = relationship(back_populates="questions")
+    response: Mapped["AssessmentResponseRecord | None"] = relationship(
+        back_populates="question", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class AssessmentResponseRecord(Base):
+    __tablename__ = "assessment_responses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assessment_question_id: Mapped[int] = mapped_column(
+        ForeignKey("assessment_questions.id"), unique=True, index=True
+    )
+    learner_answer_json: Mapped[Any] = mapped_column(JSON)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    feedback_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evaluation_source: Mapped[str] = mapped_column(String(30))
+    evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=True
+    )
+
+    question: Mapped[AssessmentQuestionRecord] = relationship(back_populates="response")
 
 
 class Weakness(Base):
@@ -266,3 +318,29 @@ class Recommendation(Base):
 
     learner: Mapped[Learner] = relationship(back_populates="recommendations")
     topic: Mapped[Topic | None] = relationship(back_populates="recommendations")
+
+
+class TutorConversation(Base):
+    __tablename__ = "tutor_conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    learner_id: Mapped[int] = mapped_column(ForeignKey("learners.id", ondelete="CASCADE"), index=True)
+    topic_id: Mapped[str] = mapped_column(ForeignKey("topics.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(160), default="Tutor conversation")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True
+    )
+
+
+class TutorMessage(Base):
+    __tablename__ = "tutor_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("tutor_conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

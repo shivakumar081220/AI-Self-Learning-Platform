@@ -319,6 +319,58 @@ def test_strong_result_advances_and_updates_path(client: TestClient):
         assert progress.status == "completed"
         assert path.path_json[path.current_index]["topic_id"] != topic_id
 
+    reopened_topic = client.get(
+        f"/api/learners/{learner['id']}/learning-path/current",
+        params={"topic_id": topic_id},
+    )
+    reopened_content = client.get(
+        f"/api/learners/{learner['id']}/topics/{topic_id}/content"
+    )
+    assert reopened_topic.status_code == 200
+    assert reopened_topic.json()["status"] == "completed"
+    assert reopened_content.status_code == 200
+    assert reopened_content.json()["content"]["topic_id"] == topic_id
+
+
+def test_topic_lesson_completion_does_not_count_as_course_completion(client: TestClient):
+    learner = client.post(
+        "/api/learners",
+        json={
+            "name": "Assessment Required",
+            "experience_level": "beginner",
+            "goal_key": "llm_apps",
+        },
+    ).json()
+    path = client.post(
+        f"/api/learners/{learner['id']}/learning-path/generate"
+    ).json()
+    topic_id = path["current_topic_id"]
+
+    completed_lesson = client.post(
+        f"/api/learners/{learner['id']}/topics/{topic_id}/complete"
+    )
+    current_path = client.get(
+        f"/api/learners/{learner['id']}/learning-path"
+    ).json()
+
+    assert completed_lesson.status_code == 200
+    assert completed_lesson.json()["topic_id"] == topic_id
+    assert current_path["current_topic_id"] == topic_id
+    assert next(
+        topic for topic in current_path["topics"] if topic["topic_id"] == topic_id
+    )["status"] == "current"
+    assert sum(topic["status"] == "completed" for topic in current_path["topics"]) == 0
+    with Session(app.state.phase7_test_engine) as database:
+        progress = database.scalar(
+            select(TopicProgress).where(
+                TopicProgress.learner_id == learner["id"],
+                TopicProgress.topic_id == topic_id,
+            )
+        )
+        assert progress is not None
+        assert progress.lesson_completed is True
+        assert progress.status == "in_progress"
+
 
 def test_invalid_answers_duplicate_submission_and_persisted_result(client: TestClient):
     learner, _, topic_id = prepare_learned_topic(client)

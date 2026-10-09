@@ -9,7 +9,17 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import Base
-from app.models import AIArtifactCache, Assessment, Learner, SkillScore, Topic, Weakness
+from app.models import (
+    AIArtifactCache,
+    Assessment,
+    GeneratedCourse,
+    Learner,
+    SkillScore,
+    Topic,
+    TopicProgress,
+    User,
+    Weakness,
+)
 from app.schemas import LearningContent
 from app.seed_topics import seed_topics
 from app.services import ai_provider
@@ -325,6 +335,54 @@ def test_learning_content_accepts_valid_openrouter_response(learning_context):
             "prerequisites": [],
             "practice_suggestion": "Explain one generated response and identify its evidence.",
             "important_notes": ["Validate model output before using it."],
+            "title": "Generative AI foundations",
+            "introduction": "Generative AI creates new outputs by learning patterns from examples and context.",
+            "why_it_matters": "This distinction helps you design applications that validate generated content.",
+            "sections": [
+                {
+                    "title": "Core concepts",
+                    "summary": "Generative models create outputs while applications supply context and constraints.",
+                    "subsections": [
+                        {
+                            "title": "Model and application responsibilities",
+                            "explanation": "The model proposes an output and application logic validates how it is used.",
+                            "key_points": ["Model output is not automatically verified."],
+                            "examples": ["A support assistant drafts from approved policy text."],
+                            "practical_application": "Validate generated answers before showing them to users.",
+                            "tutor_prompts": ["Explain this simply", "Give me an example"],
+                        }
+                    ],
+                }
+            ],
+            "code_examples": [
+                {
+                    "title": "Validate a response",
+                    "language": "python",
+                    "code": "answer = {'text': 'draft'}\nassert 'text' in answer",
+                    "explanation": "A small deterministic check validates the expected response shape.",
+                    "expected_output": "",
+                }
+            ],
+            "common_mistake_details": [
+                {
+                    "mistake": "Treating fluent text as proof",
+                    "explanation": "A fluent model response can still be incomplete or inaccurate.",
+                    "correction": "Validate claims against trusted evidence before use.",
+                }
+            ],
+            "key_takeaways": [
+                "Models generate likely content.",
+                "Applications add constraints and validation.",
+            ],
+            "self_check": [
+                {
+                    "question": "What should validate a generated answer before use?",
+                    "hint": "Think about deterministic application checks.",
+                }
+            ],
+            "important_points": ["Keep validation outside the model."],
+            "recommended_focus": ["application_constraints"],
+            "assessment_recommendation": "Try concept and scenario questions.",
         }
     )
 
@@ -334,6 +392,12 @@ def test_learning_content_accepts_valid_openrouter_response(learning_context):
     assert content.topic_id == topic.id
     assert content.real_world_example
     assert content.practice_suggestion
+    assert content.sections[0].subsections[0].title == "Model and application responsibilities"
+    assert content.code_examples[0].language == "python"
+    assert content.common_mistake_details[0].correction
+    request_payload = json.loads(FakeOpenRouter.request["messages"][1]["content"])
+    assert request_payload["context"]["learner"]["experience_level"] == learner.experience_level
+    assert "expert instructional designer" in FakeOpenRouter.request["messages"][0]["content"]
 
 
 def test_learning_content_invalid_response_uses_curated_fallback(learning_context):
@@ -355,9 +419,63 @@ def test_learning_content_invalid_response_uses_curated_fallback(learning_contex
     assert content.learning_objectives
 
 
+def test_generated_one_concept_topic_fallback_survives_provider_failure(
+    learning_context, monkeypatch
+):
+    database, learner = learning_context
+    topic = Topic(
+        id="generated-one-concept-content",
+        title="Machine Learning Foundations",
+        description="Introduce a practical foundation for machine learning systems.",
+        difficulty="beginner",
+        concept_tags=["machine_learning"],
+        content_source="AI-generated learner curriculum",
+    )
+    database.add(topic)
+    database.flush()
+
+    provider_calls = []
+
+    def fail_provider(**_kwargs):
+        provider_calls.append(1)
+        raise RuntimeError("rate limited")
+
+    monkeypatch.setattr(ai_provider, "OpenAI", fail_provider)
+
+    content, source = generate_learning_content(topic, learner, database)
+    cached_content, cached_source = generate_learning_content(topic, learner, database)
+
+    assert source == "curated_fallback"
+    assert cached_source == "curated_fallback"
+    assert content.topic_id == topic.id
+    assert content.key_concepts == ["machine learning", "Machine Learning Foundations"]
+    assert cached_content == content
+    assert provider_calls == [1]
+    cache = database.query(AIArtifactCache).filter_by(operation="learning_content").one()
+    assert cache.expires_at is None
+
+
 def test_learning_content_is_persistently_cached_and_reused(learning_context, monkeypatch):
     database, learner = learning_context
     topic = database.get(Topic, "ai-foundations")
+    user = User(email="lesson-cache@example.test", password_hash="test-hash")
+    database.add(user)
+    database.flush()
+    course = GeneratedCourse(
+        user_id=user.id,
+        learner_id=learner.id,
+        title="Grounded Support Assistant",
+        description="A course for building a grounded support assistant.",
+        goal=learner.goal_text,
+        target_outcome=learner.target_outcome,
+        level=learner.experience_level,
+        estimated_duration="60 minutes",
+        track_id=learner.track,
+    )
+    database.add(course)
+    database.flush()
+    topic.course_id = course.id
+    database.commit()
     calls = []
 
     def generate_once(*args, **kwargs):
@@ -389,6 +507,100 @@ def test_learning_content_is_persistently_cached_and_reused(learning_context, mo
     assert first_source == "openrouter"
     assert second_source == "cache"
     assert first == second
+    assert calls == [1]
+    assert database.query(AIArtifactCache).filter_by(operation="learning_content").count() == 1
+
+
+def test_saved_lesson_is_reused_after_learner_state_changes_and_session_refresh(
+    learning_context, monkeypatch
+):
+    database, learner = learning_context
+    topic = database.get(Topic, "ai-foundations")
+    user = User(email="lesson-reopen@example.test", password_hash="test-hash")
+    database.add(user)
+    database.flush()
+    course = GeneratedCourse(
+        user_id=user.id,
+        learner_id=learner.id,
+        title="Grounded Support Assistant",
+        description="A course for building a grounded support assistant.",
+        goal=learner.goal_text,
+        target_outcome=learner.target_outcome,
+        level=learner.experience_level,
+        estimated_duration="60 minutes",
+        track_id=learner.track,
+    )
+    database.add(course)
+    database.flush()
+    topic.course_id = course.id
+    database.commit()
+    calls = []
+
+    def generate_once(*args, **kwargs):
+        calls.append(1)
+        return LearningContent(
+            topic_id=topic.id,
+            topic_title=topic.title,
+            overview="Learn how generative models create outputs from learned patterns.",
+            learning_objectives=["Explain model generation", "Apply validation to an output"],
+            explanation=(
+                "Generative models learn patterns from data and use those patterns to create new outputs. "
+                "Applications add context and validation around the model."
+            ),
+            key_concepts=["generative models", "validation"],
+            examples=["Draft a response using approved support information."],
+            real_world_example="A support assistant uses approved policy text to draft an answer.",
+            practical_example="Combine an approved passage with a user question and review the generated result.",
+            common_mistakes=["Treating fluent output as verified truth."],
+            quick_recap=["Models generate from learned patterns.", "Applications still validate output."],
+            prerequisites=[],
+            practice_suggestion="Explain a generated answer and identify its evidence.",
+        )
+
+    monkeypatch.setattr("app.services.content_service._openrouter_content", generate_once)
+    first_content, first_source = generate_learning_content(topic, learner, database)
+    assert first_source == "openrouter"
+    cached_artifact = database.query(AIArtifactCache).filter_by(
+        learner_id=learner.id, operation="learning_content"
+    ).one()
+    cached_artifact.cache_key = "a" * 64
+    database.commit()
+
+    database.query(SkillScore).filter_by(
+        learner_id=learner.id, concept="embeddings"
+    ).one().score = 0.95
+    database.add(
+        TopicProgress(
+            learner_id=learner.id,
+            topic_id=topic.id,
+            status="completed",
+            lesson_completed=True,
+        )
+    )
+    database.add(
+        Assessment(
+            learner_id=learner.id,
+            topic_id=topic.id,
+            assessment_type="topic",
+            questions_json=[],
+            answers_json=[],
+            score=1.0,
+            completed_at=datetime.utcnow(),
+        )
+    )
+    database.commit()
+
+    with Session(database.get_bind()) as reopened_database:
+        reopened_learner = reopened_database.get(Learner, learner.id)
+        reopened_topic = reopened_database.get(Topic, topic.id)
+        assert reopened_learner is not None
+        assert reopened_topic is not None
+        reopened_content, reopened_source = generate_learning_content(
+            reopened_topic, reopened_learner, reopened_database
+        )
+
+    assert reopened_source == "cache"
+    assert reopened_content == first_content
     assert calls == [1]
     assert database.query(AIArtifactCache).filter_by(operation="learning_content").count() == 1
 

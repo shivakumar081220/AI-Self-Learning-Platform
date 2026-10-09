@@ -1,21 +1,32 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from typing import Any
 
 from ..database import get_db
-from ..models import Assessment, Learner, LearningPath, Recommendation, SkillScore, Topic, TopicProgress
+from ..models import Assessment, AssessmentResponseRecord, Learner, LearningPath, Recommendation, Topic, TopicProgress
 from ..schemas import (
     AssessmentGenerateResponse,
     AssessmentQuestionPublic,
     AssessmentQuestionSet,
     AssessmentResultResponse,
     AssessmentSubmitRequest,
+    AssessmentTypesQuestionSet,
+    GenerateAssessmentRequest,
     ConceptResult,
     QuestionReviewItem,
     RecommendationResponse,
 )
 from ..services.assessment_result_service import apply_assessment_result, classify_score
 from ..services.assessment_service import generate_assessment_questions
+from ..services.multi_type_assessment_service import (
+    ASSESSMENT_VERSION,
+    apply_multi_type_result,
+    generate_assessment,
+    persisted_multi_type_result,
+    public_question,
+    save_question_records,
+)
 from ..models import User
 from ..security import ensure_learner_access, get_optional_user
 from ..topic_titles import display_topic_title
@@ -61,10 +72,36 @@ def _get_assessment_context(
 def _public_response(
     assessment: Assessment, topic: Topic, source: str
 ) -> AssessmentGenerateResponse:
+    if assessment.assessment_version == ASSESSMENT_VERSION:
+        question_set = AssessmentTypesQuestionSet.model_validate(
+            {"questions": assessment.questions_json}
+        )
+        saved_answers = {
+            item.question_id: item.response.learner_answer_json
+            for item in assessment.questions
+            if item.response is not None
+        }
+        return AssessmentGenerateResponse(
+            assessment_id=assessment.id,
+            learner_id=assessment.learner_id,
+            course_id=topic.course_id,
+            topic_id=topic.id,
+            topic_title=display_topic_title(topic.title),
+            status="submitted" if assessment.completed_at else "pending",
+            questions=[
+                AssessmentQuestionPublic.model_validate(public_question(question))
+                for question in question_set.questions
+            ],
+            source=source,
+            selected_types=assessment.selected_types or [],
+            question_count=len(question_set.questions),
+            saved_answers=saved_answers,
+        )
     question_set = AssessmentQuestionSet.model_validate({"questions": assessment.questions_json})
     return AssessmentGenerateResponse(
         assessment_id=assessment.id,
         learner_id=assessment.learner_id,
+        course_id=topic.course_id,
         topic_id=topic.id,
         topic_title=display_topic_title(topic.title),
         status="submitted" if assessment.completed_at else "pending",
@@ -79,6 +116,8 @@ def _public_response(
             for question in question_set.questions
         ],
         source=source,
+        selected_types=["mcq"],
+        question_count=len(question_set.questions),
     )
 
 
@@ -207,7 +246,11 @@ def _persisted_result(assessment: Assessment, topic: Topic, database: Session) -
 
 @router.post("/topics/{topic_id}/assessment/generate", response_model=AssessmentGenerateResponse)
 def generate_topic_assessment(
-    learner_id: int, topic_id: str, database: Session = Depends(get_db), user: User | None = Depends(get_optional_user)
+    learner_id: int,
+    topic_id: str,
+    payload: GenerateAssessmentRequest | None = None,
+    database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
 ) -> AssessmentGenerateResponse:
     learner, topic, _, progress = _get_assessment_context(
         learner_id, topic_id, database, require_completed=False, user=user
@@ -222,20 +265,37 @@ def generate_topic_assessment(
         )
         .order_by(Assessment.created_at.asc())
     ).all()
-    if (not progress or progress.status != "completed") and not previous_assessments:
+    if (
+        not progress
+        or (not progress.lesson_completed and progress.status != "completed")
+    ) and not previous_assessments:
         raise HTTPException(
             status_code=400,
             detail="Complete the learning activity before starting its assessment",
         )
-    pending_assessment = database.scalar(
+    selected_types = payload.selected_types if payload else ["mcq"]
+    question_count = payload.question_count if payload else 3
+    effective_question_count = max(question_count, len(selected_types))
+    pending_assessments = database.scalars(
         select(Assessment)
         .where(
             Assessment.learner_id == learner_id,
             Assessment.topic_id == topic_id,
             Assessment.assessment_type == "topic",
-            Assessment.completed_at.is_(None),
+            Assessment.status == "pending",
         )
         .order_by(Assessment.created_at.desc())
+    ).all()
+    pending_assessment = next(
+        (
+            item
+            for item in pending_assessments
+            if item.assessment_version == ASSESSMENT_VERSION
+            and set(item.selected_types or []) == set(selected_types)
+            and len(item.questions_json) == effective_question_count
+            and (item.feedback_json or {}).get("generation_difficulty") == topic.difficulty
+        ),
+        None,
     )
     if pending_assessment:
         source = (pending_assessment.feedback_json or {}).get(
@@ -243,33 +303,182 @@ def generate_topic_assessment(
         )
         return _public_response(pending_assessment, topic, source)
 
-    weak_concepts = [
-        skill.concept
-        for skill in database.scalars(
-            select(SkillScore).where(
-                SkillScore.learner_id == learner.id,
-                SkillScore.score < 0.75,
+    if payload is None:
+        pending_legacy_assessment = next(
+            (
+                item
+                for item in pending_assessments
+                if item.assessment_version == "legacy-mcq-v1"
+            ),
+            None,
+        )
+        if pending_legacy_assessment:
+            source = (pending_legacy_assessment.feedback_json or {}).get(
+                "generation_source", "curated_fallback"
             )
-        ).all()
-    ]
-    previous_questions = [
-        question
-        for previous in previous_assessments
-        for question in previous.questions_json
-    ]
-    question_set, source = generate_assessment_questions(
-        database, topic, learner, weak_concepts, previous_questions
+            return _public_response(pending_legacy_assessment, topic, source)
+        previous_questions = [
+            question
+            for item in previous_assessments
+            for question in item.questions_json
+        ]
+        question_set, source = generate_assessment_questions(
+            database, topic, learner, previous_questions=previous_questions
+        )
+        assessment = Assessment(
+            learner_id=learner_id,
+            topic_id=topic_id,
+            assessment_type="topic",
+            questions_json=[
+                question.model_dump(mode="json")
+                for question in question_set.questions
+            ],
+            selected_types=["mcq"],
+            status="pending",
+            total_points=len(question_set.questions),
+            assessment_version="legacy-mcq-v1",
+            feedback_json={"generation_source": source},
+        )
+        database.add(assessment)
+        database.commit()
+        database.refresh(assessment)
+        return _public_response(assessment, topic, source)
+
+    question_set, source = generate_assessment(
+        database, topic, learner, selected_types, question_count
     )
     assessment = Assessment(
         learner_id=learner_id,
         topic_id=topic_id,
         assessment_type="topic",
-        questions_json=[question.model_dump() for question in question_set.questions],
-        feedback_json={"generation_source": source},
+        selected_types=selected_types,
+        assessment_version=ASSESSMENT_VERSION,
+        feedback_json={
+            "generation_source": source,
+            "generation_difficulty": topic.difficulty,
+        },
     )
     database.add(assessment)
+    database.flush()
+    save_question_records(database, assessment, question_set)
     database.commit()
     database.refresh(assessment)
+    return _public_response(assessment, topic, source)
+
+
+@router.get(
+    "/topics/{topic_id}/assessment/pending",
+    response_model=AssessmentGenerateResponse | None,
+)
+def get_pending_topic_assessment(
+    learner_id: int,
+    topic_id: str,
+    database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+) -> AssessmentGenerateResponse | None:
+    learner, topic, _, _ = _get_assessment_context(
+        learner_id, topic_id, database, require_completed=False, user=user
+    )
+    assessments = database.scalars(
+        select(Assessment)
+        .where(
+            Assessment.learner_id == learner.id,
+            Assessment.topic_id == topic.id,
+            Assessment.assessment_type == "topic",
+            Assessment.assessment_version == ASSESSMENT_VERSION,
+            Assessment.status == "pending",
+        )
+        .order_by(Assessment.created_at.desc())
+    ).all()
+    assessment = next(
+        (
+            item
+            for item in assessments
+            if (item.feedback_json or {}).get("generation_difficulty") == topic.difficulty
+        ),
+        None,
+    )
+    if not assessment:
+        return None
+    source = (assessment.feedback_json or {}).get("generation_source", "curated_fallback")
+    return _public_response(assessment, topic, source)
+
+
+@router.put(
+    "/assessments/{assessment_id}/responses",
+    response_model=AssessmentGenerateResponse,
+)
+def save_assessment_responses(
+    learner_id: int,
+    assessment_id: int,
+    payload: AssessmentSubmitRequest,
+    database: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+) -> AssessmentGenerateResponse:
+    assessment = database.scalar(
+        select(Assessment).where(
+            Assessment.id == assessment_id,
+            Assessment.learner_id == learner_id,
+            Assessment.assessment_type == "topic",
+            Assessment.assessment_version == ASSESSMENT_VERSION,
+            Assessment.status == "pending",
+        )
+    )
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Pending assessment not found")
+    learner = database.get(Learner, learner_id)
+    ensure_learner_access(learner, user)
+    topic = database.get(Topic, assessment.topic_id) if assessment.topic_id else None
+    if not topic:
+        raise HTTPException(status_code=404, detail="Assessment topic not found")
+    question_set = AssessmentTypesQuestionSet.model_validate(
+        {"questions": assessment.questions_json}
+    )
+    question_by_id = {item.question_id: item for item in question_set.questions}
+    question_records = {
+        item.question_id: item
+        for item in assessment.questions
+    }
+    submitted_ids = [item.question_id for item in payload.answers]
+    if len(submitted_ids) != len(set(submitted_ids)):
+        raise HTTPException(status_code=422, detail="Each question can be saved only once")
+    for answer in payload.answers:
+        question = question_by_id.get(answer.question_id)
+        record = question_records.get(answer.question_id)
+        if not question or not record:
+            raise HTTPException(status_code=422, detail="Unknown assessment question")
+        if question.question_type == "mcq":
+            if (
+                answer.selected_option is None
+                or question.options is None
+                or answer.selected_option >= len(question.options)
+            ):
+                raise HTTPException(status_code=422, detail="Invalid MCQ answer")
+            answer_data: Any = {"selected_option": answer.selected_option}
+        else:
+            if answer.selected_option is not None or answer.learner_answer is None:
+                raise HTTPException(status_code=422, detail="Invalid answer format")
+            answer_data = answer.learner_answer
+        response = record.response
+        if response is None:
+            response = AssessmentResponseRecord(
+                question=record,
+                learner_answer_json=answer_data,
+                score=0.0,
+                feedback_json={},
+                evaluation_source="pending",
+                evaluated_at=None,
+            )
+            database.add(response)
+        else:
+            response.learner_answer_json = answer_data
+            response.evaluation_source = "pending"
+            response.score = 0.0
+            response.feedback_json = {}
+            response.evaluated_at = None
+    database.commit()
+    database.refresh(assessment)
+    source = (assessment.feedback_json or {}).get("generation_source", "curated_fallback")
     return _public_response(assessment, topic, source)
 
 
@@ -295,6 +504,8 @@ def get_assessment(
     if not topic:
         raise HTTPException(status_code=500, detail="Assessment topic is unavailable")
     if assessment.completed_at:
+        if assessment.assessment_version == ASSESSMENT_VERSION:
+            return persisted_multi_type_result(assessment, learner, topic)
         return _persisted_result(assessment, topic, database)
     source = (assessment.feedback_json or {}).get("generation_source", "curated_fallback")
     return _public_response(assessment, topic, source)
@@ -321,7 +532,16 @@ def submit_assessment(
         raise HTTPException(status_code=409, detail="Assessment is already submitted")
     learner, topic, _, _ = _get_assessment_context(learner_id, assessment.topic_id, database, False, user)
     try:
+        if assessment.assessment_version == ASSESSMENT_VERSION:
+            question_set = AssessmentTypesQuestionSet.model_validate(
+                {"questions": assessment.questions_json}
+            )
+            return apply_multi_type_result(
+                database, assessment, learner, topic, question_set, payload.answers
+            )
         question_set = AssessmentQuestionSet.model_validate({"questions": assessment.questions_json})
         return apply_assessment_result(database, assessment, learner, topic, question_set, payload.answers)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
