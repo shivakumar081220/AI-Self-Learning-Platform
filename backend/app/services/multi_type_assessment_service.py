@@ -51,6 +51,18 @@ logger = logging.getLogger(__name__)
 ASSESSMENT_VERSION = "multi-type-v1"
 SUBJECTIVE_TYPES = {"conceptual", "scenario", "comparison"}
 PUBLIC_METADATA_KEYS = {"answer_format", "comparison_target", "requirements"}
+_ASSESSMENT_VALIDATION_REASONS = {
+    "Generated assessment has an unexpected question count": "unexpected_question_count",
+    "Generated assessment does not match the selected types": "selected_type_mismatch",
+    "Generated assessment contains an unknown topic concept": "unknown_topic_concept",
+    "Generated assessment repeats a previous question": "repeated_question",
+    "Generated question metadata contains hidden assessment data": "hidden_assessment_data",
+    "Generated question references an unknown expected concept": "unknown_expected_concept",
+    "Code-output questions must use Python": "invalid_code_output_question",
+    "Code tasks must use Python": "invalid_code_task_language",
+    "Code tasks may include at most 20 tests": "too_many_code_tests",
+    "Code test cases must define args, kwargs and expected": "invalid_code_test_case",
+}
 
 
 def _question_fingerprint(question: str) -> str:
@@ -432,9 +444,12 @@ def generate_assessment(
                     "openrouter",
                 )
             except (AIProviderError, ValidationError, ValueError) as error:
+                reason = _ASSESSMENT_VALIDATION_REASONS.get(
+                    str(error), type(error).__name__
+                )
                 logger.warning(
                     "AI assessment generation used deterministic fallback; reason=%s",
-                    type(error).__name__,
+                    reason,
                 )
         return _fallback_set(
             topic, selected_types, effective_count, previous_questions

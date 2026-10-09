@@ -791,6 +791,27 @@ def test_invalid_generated_set_uses_valid_fallback_and_cache_reuse(client: TestC
     assert len(calls) == 1
 
 
+def test_value_error_uses_fallback_and_logs_validation_reason(
+    client: TestClient, monkeypatch, caplog
+):
+    learner_id, topic_id = prepare_topic(client)
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+
+    def invalid_generation(*_args, **_kwargs):
+        raise ValueError("Generated assessment has an unexpected question count")
+
+    monkeypatch.setattr(multi, "_openrouter_questions", invalid_generation)
+    response = client.post(
+        f"/api/learners/{learner_id}/topics/{topic_id}/assessment/generate",
+        json={"selected_types": ["mcq"], "question_count": 2},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["source"] == "curated_fallback"
+    assert len(response.json()["questions"]) == 2
+    assert "reason=unexpected_question_count" in caplog.text
+
+
 def test_retake_avoids_previous_questions_and_sends_recent_history_to_ai(
     client: TestClient, monkeypatch
 ):

@@ -13,6 +13,7 @@ backend/*.sqlite3
 *.db
 *.sqlite
 *.sqlite3
+backend/data/tutor_uploads/
 
 node_modules/
 dist/

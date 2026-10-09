@@ -1,4 +1,5 @@
 import logging
+import json
 import re
 from datetime import datetime, timezone
 
@@ -46,6 +47,76 @@ def _tokens(value: str) -> set[str]:
         for token in re.findall(r"[a-z0-9_]+", value.casefold())
         if len(token) >= 4 and token not in _TUTOR_STOP_WORDS
     }
+
+
+def bounded_tutor_context(context: TutorContextResponse) -> dict:
+    payload = context.model_dump(mode="json")
+    topic = payload.get("current_topic")
+    lesson = topic.get("lesson_content") if isinstance(topic, dict) else None
+    if not isinstance(lesson, dict):
+        return payload
+
+    def short(value: object, limit: int) -> str:
+        return value[:limit] if isinstance(value, str) else ""
+
+    bounded_lesson: dict = {}
+    for key in ("topic_id", "topic_title"):
+        if lesson.get(key):
+            bounded_lesson[key] = short(lesson[key], 160)
+    for key in ("overview", "explanation", "practical_example"):
+        if lesson.get(key):
+            bounded_lesson[key] = short(lesson[key], 1800)
+    for key in ("learning_objectives", "key_concepts", "quick_recap"):
+        values = lesson.get(key)
+        if isinstance(values, list):
+            bounded_lesson[key] = [short(value, 180) for value in values[:8] if isinstance(value, str)]
+    for key in ("examples", "common_mistakes"):
+        values = lesson.get(key)
+        if isinstance(values, list):
+            bounded_lesson[key] = [short(value, 500) for value in values[:4] if isinstance(value, str)]
+    sections = lesson.get("sections")
+    if isinstance(sections, list):
+        bounded_lesson["sections"] = [
+            {
+                "title": short(section.get("title"), 120),
+                "summary": short(section.get("summary"), 450),
+                "subsections": [
+                    {
+                        "title": short(subsection.get("title"), 120),
+                        "explanation": short(subsection.get("explanation"), 650),
+                        "key_points": [
+                            short(point, 150)
+                            for point in subsection.get("key_points", [])[:4]
+                            if isinstance(point, str)
+                        ],
+                        "examples": [
+                            short(example, 300)
+                            for example in subsection.get("examples", [])[:2]
+                            if isinstance(example, str)
+                        ],
+                    }
+                    for subsection in section.get("subsections", [])[:3]
+                    if isinstance(subsection, dict)
+                ],
+            }
+            for section in sections[:4]
+            if isinstance(section, dict)
+        ]
+    code_examples = lesson.get("code_examples")
+    if isinstance(code_examples, list):
+        bounded_lesson["code_examples"] = [
+            {
+                "title": short(example.get("title"), 120),
+                "language": short(example.get("language"), 30),
+                "code": short(example.get("code"), 1200),
+                "explanation": short(example.get("explanation"), 500),
+                "expected_output": short(example.get("expected_output"), 300),
+            }
+            for example in code_examples[:3]
+            if isinstance(example, dict)
+        ]
+    topic["lesson_content"] = bounded_lesson
+    return payload
 
 
 def _response_is_relevant(
@@ -531,9 +602,10 @@ def generate_tutor_response(
     recent_messages: list[TutorMessage],
     section_context: TutorSectionContext | None = None,
     teaching_style: TutorTeachingStyle | None = None,
+    image_data_urls: list[str] | None = None,
 ) -> tuple[TutorResponsePayload, str]:
     history = [
-        {"role": message.role, "content": message.content[:2000]}
+        {"role": message.role, "content": message.content[:1200]}
         for message in recent_messages[-RECENT_HISTORY_LIMIT:]
     ]
     weak_names = [item["concept"] for item in context.weak_concepts]
@@ -544,8 +616,23 @@ def generate_tutor_response(
         "code_based": "code-based explanation",
         "step_by_step": "step-by-step explanation",
     }
+    if image_data_urls and not settings.openrouter_vision_model:
+        raise AIProviderError(
+            "Image analysis is unavailable. Configure OPENROUTER_VISION_MODEL with a vision-capable model."
+        )
+    if image_data_urls and not settings.openrouter_api_key:
+        raise AIProviderError("Image analysis requires OPENROUTER_API_KEY to be configured.")
     if settings.openrouter_api_key:
         try:
+            user_payload = {
+                "learner_context": bounded_tutor_context(context),
+                "section_context": (
+                    section_context.model_dump(mode="json") if section_context else None
+                ),
+                "recent_conversation": history,
+                "latest_question": question,
+                "teaching_style": teaching_style,
+            }
             result = request_structured_json(
                 operation="context_aware_tutor",
                 system_prompt=(
@@ -578,21 +665,33 @@ def generate_tutor_response(
                     "explicitly change the explanation structure and examples, and do not repeat the previous answer. "
                     "Set teaching_approach to the exact human-readable label for the requested style."
                 ),
-                user_payload={
-                    "learner_context": context.model_dump(mode="json"),
-                    "section_context": (
-                        section_context.model_dump(mode="json") if section_context else None
-                    ),
-                    "recent_conversation": history,
-                    "latest_question": question,
-                    "teaching_style": teaching_style,
-                },
+                user_payload=user_payload,
                 response_model=TutorResponsePayload,
                 temperature=0.4,
                 max_tokens=800,
                 timeout_seconds=min(settings.openrouter_timeout_seconds, 10.0),
                 hard_timeout_seconds=10.0,
                 retry_on_failure=False,
+                model_name=(
+                    settings.openrouter_vision_model if image_data_urls else None
+                ),
+                user_content=(
+                    [
+                        {
+                            "type": "text",
+                            "text": json.dumps(user_payload, ensure_ascii=True),
+                        },
+                        *[
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url, "detail": "low"},
+                            }
+                            for data_url in image_data_urls
+                        ],
+                    ]
+                    if image_data_urls
+                    else None
+                ),
             )
             if not _response_is_relevant(result, context, question, section_context):
                 logger.warning(
@@ -600,6 +699,8 @@ def generate_tutor_response(
                     "topic_id=%s",
                     context.current_topic["topic_id"],
                 )
+                if image_data_urls:
+                    raise AIProviderError("Vision response failed relevance validation")
                 return (
                     _fallback_response(
                         context, question, section_context, teaching_style
@@ -653,6 +754,8 @@ def generate_tutor_response(
                     result.weak_area_addressed = None
             return result, "openrouter"
         except (AIProviderError, ValidationError, ValueError) as error:
+            if image_data_urls:
+                raise AIProviderError("Vision tutor request could not be completed") from None
             logger.warning(
                 "AI operation used context-aware tutor fallback; reason=%s",
                 type(error).__name__,

@@ -2,11 +2,29 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000
 const REQUEST_TIMEOUT_MS = 70_000;
 
 class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, serverDetail = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.serverDetail = serverDetail;
   }
+}
+
+function tutorCodingRequest(path, options) {
+  return request(path, options).catch((error) => {
+    if (!(error instanceof ApiError)) throw error;
+    if (error.status === 404 && (!error.serverDetail || error.serverDetail === "Not Found")) {
+      throw new ApiError(
+        "The running backend does not have this AI Tutor coding endpoint. Restart the backend from this project using its virtual environment, then reload the tutor page.",
+        error.status,
+        error.serverDetail,
+      );
+    }
+    if ((error.status === 429 || error.status === 503) && error.serverDetail) {
+      throw new ApiError(error.serverDetail, error.status, error.serverDetail);
+    }
+    throw error;
+  });
 }
 
 async function request(path, options = {}) {
@@ -18,7 +36,7 @@ async function request(path, options = {}) {
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       headers: {
-        "Content-Type": "application/json",
+        ...(fetchOptions.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
         ...(localStorage.getItem("adaptive_access_token")
           ? { Authorization: `Bearer ${localStorage.getItem("adaptive_access_token")}` }
           : {}),
@@ -60,14 +78,18 @@ async function request(path, options = {}) {
     };
     const sandboxUnavailable = response.status === 503
       && typeof body.detail === "string"
-      && body.detail.includes("CODE_SANDBOX_URL");
+      && body.detail.includes("TUTOR_CODE_SANDBOX_URL");
     const message = sandboxUnavailable
-      ? "Code execution is currently unavailable. Please try again later."
+      ? "Code execution is unavailable because the isolated sandbox is not configured. Set TUTOR_CODE_SANDBOX_URL on the backend and restart it."
       : messages[response.status]
         || (response.status < 500 && typeof body.detail === "string"
           ? body.detail
           : "The learning service could not complete this request.");
-    throw new ApiError(message, response.status);
+    throw new ApiError(
+      message,
+      response.status,
+      typeof body.detail === "string" ? body.detail : "",
+    );
   }
   return body;
 }
@@ -211,6 +233,88 @@ export function sendTutorMessage(learnerId, conversationId, content, sectionCont
       ...(teachingStyle ? { teaching_style: teachingStyle } : {}),
     }),
   });
+}
+
+export function sendTutorImageMessage(
+  learnerId,
+  conversationId,
+  content,
+  files,
+  onProgress,
+  sectionContext = null,
+) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("content", content);
+    if (sectionContext) form.append("section_context_json", JSON.stringify(sectionContext));
+    files.forEach((file) => form.append("files", file));
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      `${API_BASE_URL}/learners/${learnerId}/tutor/conversations/${conversationId}/images`,
+    );
+    const token = localStorage.getItem("adaptive_access_token")
+      || sessionStorage.getItem("adaptive_access_token");
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.timeout = REQUEST_TIMEOUT_MS;
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) onProgress?.(Math.round((event.loaded / event.total) * 100));
+    });
+    xhr.addEventListener("load", () => {
+      let body = {};
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        reject(new Error("The service returned an unreadable response."));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(
+          typeof body.detail === "string"
+            ? body.detail
+            : "The image could not be analyzed. Remove it to continue with a text-only question.",
+          xhr.status,
+        ));
+        return;
+      }
+      resolve(body);
+    });
+    xhr.addEventListener("error", () => reject(new Error("The learning service is unavailable.")));
+    xhr.addEventListener("timeout", () => reject(new Error("Image upload timed out. Retry or remove the image.")));
+    xhr.send(form);
+  });
+}
+
+export function getTutorAttachment(learnerId, attachmentId) {
+  const token = localStorage.getItem("adaptive_access_token")
+    || sessionStorage.getItem("adaptive_access_token");
+  return fetch(
+    `${API_BASE_URL}/learners/${learnerId}/tutor/attachments/${attachmentId}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  ).then(async (response) => {
+    if (!response.ok) throw new Error("This attachment is no longer available.");
+    return response.blob();
+  });
+}
+
+export function requestTutorCodingAssistant(learnerId, conversationId, payload) {
+  return tutorCodingRequest(
+    `/learners/${learnerId}/tutor/conversations/${conversationId}/coding-assistant`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+}
+
+export function runTutorCode(learnerId, conversationId, payload) {
+  return tutorCodingRequest(
+    `/learners/${learnerId}/tutor/conversations/${conversationId}/executions`,
+    { method: "POST", body: JSON.stringify(payload), timeoutMs: 20_000 },
+  );
+}
+
+export function getTutorCodeExecutions(learnerId, conversationId) {
+  return tutorCodingRequest(
+    `/learners/${learnerId}/tutor/conversations/${conversationId}/executions`,
+  );
 }
 
 export function submitAssessment(learnerId, assessmentId, answers) {

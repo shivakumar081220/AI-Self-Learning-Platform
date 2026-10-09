@@ -2,10 +2,13 @@ import asyncio
 import json
 import logging
 import time
+import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import TypeVar
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel, ValidationError
@@ -15,10 +18,61 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
+_vision_capability_cache: dict[str, tuple[float, bool]] = {}
+_vision_capability_lock = threading.Lock()
 
 
 class AIProviderError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def ensure_vision_model_supports_images(model_name: str) -> None:
+    if not settings.openrouter_api_key:
+        raise AIProviderError("OpenRouter is not configured")
+    now = time.monotonic()
+    with _vision_capability_lock:
+        cached = _vision_capability_cache.get(model_name)
+        if cached and cached[0] > now:
+            if cached[1]:
+                return
+            raise AIProviderError(
+                "The configured OpenRouter vision model does not advertise image input support"
+            )
+    request = Request(
+        f"{settings.openrouter_base_url.rstrip('/')}/models",
+        headers={
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=min(settings.openrouter_timeout_seconds, 5.0)) as response:
+            body = response.read(5_000_001)
+        if len(body) > 5_000_000:
+            raise AIProviderError("OpenRouter returned oversized model capability metadata")
+        payload = json.loads(body)
+    except (URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        raise AIProviderError("OpenRouter model capabilities could not be verified") from None
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise AIProviderError("OpenRouter returned invalid model capability metadata")
+    selected = next(
+        (
+            item for item in payload["data"]
+            if isinstance(item, dict) and item.get("id") == model_name
+        ),
+        None,
+    )
+    architecture = selected.get("architecture") if selected else None
+    modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else None
+    supports_images = isinstance(modalities, list) and "image" in modalities
+    with _vision_capability_lock:
+        _vision_capability_cache[model_name] = (now + 300.0, supports_images)
+    if not supports_images:
+        raise AIProviderError(
+            "The configured OpenRouter vision model does not advertise image input support"
+        )
 
 
 def _request_with_hard_timeout(
@@ -106,6 +160,7 @@ def _log_operation(
     http_status: int | None,
     validation_status: str,
     source: str = "openrouter",
+    model: str | None = None,
 ) -> None:
     logger.info(
         "ai_operation=%s started_at=%s duration_ms=%d status=%s source=%s model=%s "
@@ -115,7 +170,7 @@ def _log_operation(
         round((time.monotonic() - started_clock) * 1000),
         status,
         source,
-        settings.openrouter_model,
+        model or settings.openrouter_model,
         http_status,
         validation_status,
     )
@@ -145,12 +200,15 @@ def request_structured_json(
     timeout_seconds: float | None = None,
     hard_timeout_seconds: float | None = None,
     retry_on_failure: bool = True,
+    model_name: str | None = None,
+    user_content: str | list[dict] | None = None,
 ) -> ResponseModel:
     started_at = datetime.now(timezone.utc).isoformat()
     started_clock = time.monotonic()
     http_status: int | None = None
     validation_status = "not_run"
     operation_status = "failure"
+    selected_model = model_name or settings.openrouter_model
     request_timeout = (
         settings.openrouter_timeout_seconds
         if timeout_seconds is None
@@ -169,6 +227,7 @@ def request_structured_json(
             http_status=None,
             validation_status="not_run",
             source="fallback",
+            model=selected_model,
         )
         raise AIProviderError("OpenRouter is not configured")
 
@@ -187,7 +246,7 @@ def request_structured_json(
             "OpenRouter client initialization failed; operation=%s model=%s http_status=None "
             "response_type=unavailable validation_error=%s missing_fields=[] unexpected_fields=[]",
             operation,
-            settings.openrouter_model,
+            selected_model,
             type(error).__name__,
         )
         _log_operation(
@@ -197,6 +256,7 @@ def request_structured_json(
             status=operation_status,
             http_status=None,
             validation_status="not_run",
+            model=selected_model,
         )
         raise AIProviderError("OpenRouter client initialization failed") from None
 
@@ -218,7 +278,7 @@ def request_structured_json(
                     "\nThis is the single retry. Return a corrected JSON object only."
                 )
             request_kwargs = {
-                "model": settings.openrouter_model,
+                "model": selected_model,
                 "temperature": temperature if attempt == 1 else 0,
                 "max_tokens": max_tokens,
                 "response_format": {
@@ -231,7 +291,12 @@ def request_structured_json(
                 },
                 "messages": [
                     {"role": "system", "content": attempt_prompt},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=True)},
+                    {
+                        "role": "user",
+                        "content": user_content
+                        if user_content is not None
+                        else json.dumps(user_payload, ensure_ascii=True),
+                    },
                 ],
             }
             try:
@@ -256,7 +321,7 @@ def request_structured_json(
                     "OpenRouter request failed; operation=%s model=%s http_status=%s attempt=%s "
                     "response_type=unavailable validation_error=%s missing_fields=[] unexpected_fields=[]",
                     operation,
-                    settings.openrouter_model,
+                    selected_model,
                     http_status,
                     attempt,
                     type(error).__name__,
@@ -264,7 +329,7 @@ def request_structured_json(
                 if transient and attempt < attempt_limit:
                     time.sleep(_retry_delay(error))
                     continue
-                raise AIProviderError("OpenRouter request failed") from None
+                raise AIProviderError("OpenRouter request failed", status_code=http_status) from None
 
             choice = response.choices[0] if response.choices else None
             message = choice.message if choice else None
@@ -276,7 +341,7 @@ def request_structured_json(
                     "http_status=%s attempt=%s response_type=%s finish_reason=%s refusal_present=%s "
                     "tool_calls_count=%s validation_error=%s missing_fields=[] unexpected_fields=[]",
                     operation,
-                    settings.openrouter_model,
+                    selected_model,
                     http_status,
                     attempt,
                     type(content).__name__,
@@ -311,7 +376,7 @@ def request_structured_json(
                     "finish_reason=%s validation_error=malformed_json parse_error=%s line=%s column=%s "
                     "missing_fields=[] unexpected_fields=[]",
                     operation,
-                    settings.openrouter_model,
+                    selected_model,
                     http_status,
                     attempt,
                     content_format,
@@ -334,7 +399,7 @@ def request_structured_json(
                     "http_status=%s attempt=%s response_type=%s validation_error=%s missing_fields=%s "
                     "unexpected_fields=%s",
                     operation,
-                    settings.openrouter_model,
+                    selected_model,
                     http_status,
                     attempt,
                     type(payload).__name__,
@@ -361,4 +426,5 @@ def request_structured_json(
             status=operation_status,
             http_status=http_status,
             validation_status=validation_status,
+            model=selected_model,
         )

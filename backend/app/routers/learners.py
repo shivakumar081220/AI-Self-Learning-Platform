@@ -1,11 +1,16 @@
 import logging
+import time
+from datetime import datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..config import settings
 from ..goal_catalog import GOAL_BY_KEY, GOAL_OPTIONS
 from ..models import (
     Assessment,
@@ -18,6 +23,8 @@ from ..models import (
     SkillScore,
     Topic,
     TopicProgress,
+    TutorAttachment,
+    TutorCodeExecution,
     TutorConversation,
     TutorMessage,
     User,
@@ -47,6 +54,12 @@ from ..schemas import (
     TutorMessageResponse,
     TutorMessageSendResponse,
     TutorResponsePayload,
+    TutorAttachmentResponse,
+    TutorCodingRequest,
+    TutorCodingResponse,
+    TutorSectionContext,
+    TutorCodeExecutionRequest,
+    TutorCodeExecutionResponse,
 )
 from ..topic_titles import display_topic_title
 from ..security import ensure_learner_access, get_optional_user, require_user
@@ -54,6 +67,22 @@ from ..services.tutor_conversation_service import (
     RECENT_HISTORY_LIMIT,
     build_tutor_context,
     generate_tutor_response,
+)
+from ..services.ai_provider import AIProviderError, ensure_vision_model_supports_images
+from ..services.code_sandbox import (
+    SandboxExecutionError,
+    SandboxTimeout,
+    SandboxUnavailable,
+    run_python,
+)
+from ..services.tutor_coding import assist_with_code
+from ..services.tutor_images import (
+    MAX_IMAGE_COUNT,
+    ValidatedImage,
+    image_data_url,
+    remove_private_images,
+    save_private_image,
+    validate_uploads,
 )
 from ..services.tutor_service import module_matches_question
 from ..track_catalog import AI_TRACKS, LEGACY_GOAL_TRACK, TRACK_BY_ID, infer_track_id
@@ -349,7 +378,9 @@ def _conversation_or_404(
     return conversation
 
 
-def _tutor_message_response(message: TutorMessage) -> TutorMessageResponse:
+def _tutor_message_response(
+    message: TutorMessage, database: Session
+) -> TutorMessageResponse:
     response = (
         TutorResponsePayload.model_validate(message.response_json)
         if message.response_json
@@ -360,6 +391,16 @@ def _tutor_message_response(message: TutorMessage) -> TutorMessageResponse:
         role=message.role,
         content=message.content,
         response=response,
+        attachments=[
+            TutorAttachmentResponse(
+                id=item.id,
+                content_type=item.content_type,
+                size_bytes=item.size_bytes,
+            )
+            for item in database.scalars(
+                select(TutorAttachment).where(TutorAttachment.message_id == message.id)
+            ).all()
+        ],
         created_at=message.created_at,
     )
 
@@ -458,7 +499,7 @@ def get_tutor_conversation(
         title=conversation.title,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
-        messages=[_tutor_message_response(message) for message in messages],
+        messages=[_tutor_message_response(message, database) for message in messages],
     )
 
 
@@ -562,11 +603,297 @@ def send_tutor_message(
     database.refresh(user_message)
     return TutorMessageSendResponse(
         conversation_id=conversation_id,
-        user_message=_tutor_message_response(user_message),
-        assistant_message=_tutor_message_response(assistant_message),
+        user_message=_tutor_message_response(user_message, database),
+        assistant_message=_tutor_message_response(assistant_message, database),
         response=response,
         source=source,
     )
+
+
+@router.post(
+    "/learners/{learner_id}/tutor/conversations/{conversation_id}/images",
+    response_model=TutorMessageSendResponse,
+)
+def send_tutor_image_message(
+    learner_id: int,
+    conversation_id: int,
+    content: str = Form(default="", max_length=2000),
+    section_context_json: str = Form(default="", max_length=5500),
+    files: list[UploadFile] = File(..., max_length=MAX_IMAGE_COUNT),
+    database: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> TutorMessageSendResponse:
+    _owned_tutor_learner(learner_id, database, user)
+    conversation = _conversation_or_404(learner_id, conversation_id, database)
+    if not settings.openrouter_api_key:
+        raise HTTPException(status_code=503, detail="Image analysis requires OPENROUTER_API_KEY.")
+    if not settings.openrouter_vision_model:
+        raise HTTPException(
+            status_code=503,
+            detail="Image analysis is unavailable. Configure OPENROUTER_VISION_MODEL with a vision-capable model.",
+        )
+    try:
+        ensure_vision_model_supports_images(settings.openrouter_vision_model)
+    except AIProviderError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Image analysis is unavailable: {error}. Verify OPENROUTER_VISION_MODEL and retry.",
+        ) from None
+    try:
+        images = validate_uploads(files)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    question = content.strip() or "Please explain the attached image in the context of this lesson."
+    section_context = None
+    if section_context_json.strip():
+        try:
+            section_context = TutorSectionContext.model_validate_json(section_context_json)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="Section context is invalid.") from error
+    try:
+        context = build_tutor_context(database, learner_id, conversation.topic_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    history_rows = list(
+        database.execute(
+            select(TutorMessage.role, TutorMessage.content)
+            .where(TutorMessage.conversation_id == conversation.id)
+            .order_by(TutorMessage.created_at.desc(), TutorMessage.id.desc())
+            .limit(RECENT_HISTORY_LIMIT)
+        ).all()
+    )
+    history_rows.reverse()
+    history = [
+        TutorMessage(conversation_id=conversation.id, role=role, content=message_content)
+        for role, message_content in history_rows
+    ]
+    user_message = TutorMessage(
+        conversation_id=conversation.id,
+        role="user",
+        content=question,
+    )
+    saved_paths: list[Path] = []
+    try:
+        response, source = generate_tutor_response(
+            context,
+            question,
+            history,
+            section_context,
+            image_data_urls=[image_data_url(image) for image in images],
+        )
+        assistant_message = TutorMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content=response.answer,
+            response_json=response.model_dump(mode="json"),
+        )
+        for image in images:
+            saved_paths.append(save_private_image(image))
+        if conversation.title == context.current_topic["title"]:
+            conversation.title = question[:157].rstrip() + ("..." if len(question) > 160 else "")
+        database.add(user_message)
+        database.add(assistant_message)
+        database.flush()
+        for image in images:
+            database.add(
+                TutorAttachment(
+                    message_id=user_message.id,
+                    storage_key=image.storage_key,
+                    content_type=image.content_type,
+                    size_bytes=image.size_bytes,
+                )
+            )
+        database.commit()
+        database.refresh(assistant_message)
+        database.refresh(user_message)
+    except AIProviderError:
+        database.rollback()
+        remove_private_images(images)
+        logger.warning(
+            "Vision tutor request failed; learner_id=%s conversation_id=%s",
+            learner_id,
+            conversation.id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="The vision model could not analyze this image. Check its availability or remove the image and retry with text.",
+        ) from None
+    except Exception as error:
+        database.rollback()
+        remove_private_images(images)
+        logger.warning(
+            "Vision tutor persistence failed; learner_id=%s conversation_id=%s reason=%s",
+            learner_id,
+            conversation.id,
+            type(error).__name__,
+        )
+        raise HTTPException(status_code=503, detail="The image message could not be saved.") from None
+
+    return TutorMessageSendResponse(
+        conversation_id=conversation.id,
+        user_message=_tutor_message_response(user_message, database),
+        assistant_message=_tutor_message_response(assistant_message, database),
+        response=response,
+        source=source,
+    )
+
+
+@router.get(
+    "/learners/{learner_id}/tutor/attachments/{attachment_id}",
+    response_class=FileResponse,
+)
+def get_tutor_attachment(
+    learner_id: int,
+    attachment_id: int,
+    database: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> FileResponse:
+    _owned_tutor_learner(learner_id, database, user)
+    attachment = database.scalar(
+        select(TutorAttachment)
+        .join(TutorMessage, TutorMessage.id == TutorAttachment.message_id)
+        .join(TutorConversation, TutorConversation.id == TutorMessage.conversation_id)
+        .where(
+            TutorAttachment.id == attachment_id,
+            TutorConversation.learner_id == learner_id,
+        )
+    )
+    if attachment is None:
+        raise HTTPException(status_code=404, detail="Tutor attachment not found")
+    root = Path(settings.tutor_upload_dir).resolve()
+    target = (root / attachment.storage_key).resolve()
+    if target.parent != root or not target.is_file():
+        raise HTTPException(status_code=404, detail="Tutor attachment not found")
+    return FileResponse(
+        target,
+        media_type=attachment.content_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.post(
+    "/learners/{learner_id}/tutor/conversations/{conversation_id}/coding-assistant",
+    response_model=TutorCodingResponse,
+)
+def tutor_coding_assistant(
+    learner_id: int,
+    conversation_id: int,
+    payload: TutorCodingRequest,
+    database: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> TutorCodingResponse:
+    _owned_tutor_learner(learner_id, database, user)
+    conversation = _conversation_or_404(learner_id, conversation_id, database)
+    try:
+        context = build_tutor_context(database, learner_id, conversation.topic_id)
+        return assist_with_code(context, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except AIProviderError as error:
+        if error.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="OpenRouter rate-limited this AI coding request. Wait before retrying, or check your OpenRouter account limits and selected model.",
+            ) from None
+        raise HTTPException(
+            status_code=503,
+            detail="AI coding assistance is unavailable. Check the OpenRouter configuration and try again.",
+        ) from None
+
+
+def _execution_response(execution: TutorCodeExecution) -> TutorCodeExecutionResponse:
+    return TutorCodeExecutionResponse(
+        execution_id=execution.id,
+        language="python",
+        status=execution.status,
+        output=execution.output,
+        stderr=execution.stderr,
+        exit_status=execution.exit_status,
+        duration_ms=execution.duration_ms,
+        provider_duration_ms=execution.provider_duration_ms,
+        created_at=execution.created_at,
+        provider_metadata_available=(
+            execution.duration_ms is not None or execution.exit_status is not None
+        ),
+    )
+
+
+@router.post(
+    "/learners/{learner_id}/tutor/conversations/{conversation_id}/executions",
+    response_model=TutorCodeExecutionResponse,
+)
+def execute_tutor_code(
+    learner_id: int,
+    conversation_id: int,
+    payload: TutorCodeExecutionRequest,
+    database: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> TutorCodeExecutionResponse:
+    _owned_tutor_learner(learner_id, database, user)
+    conversation = _conversation_or_404(learner_id, conversation_id, database)
+    try:
+        build_tutor_context(database, learner_id, conversation.topic_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    started = time.monotonic()
+    try:
+        result = run_python(payload.source_code, payload.stdin)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except SandboxTimeout as error:
+        result = {"status": "timeout", "output": "", "stderr": str(error), "duration_ms": None,
+                  "exit_status": None, "provider_duration_ms": round((time.monotonic() - started) * 1000)}
+    except SandboxUnavailable as error:
+        result = {"status": "unavailable", "output": "", "stderr": str(error), "duration_ms": None,
+                  "exit_status": None, "provider_duration_ms": None}
+    except SandboxExecutionError as error:
+        result = {"status": "failed", "output": "", "stderr": str(error), "duration_ms": None,
+                  "exit_status": None, "provider_duration_ms": round((time.monotonic() - started) * 1000)}
+    execution = TutorCodeExecution(
+        conversation_id=conversation.id,
+        learner_id=learner_id,
+        language=payload.language,
+        status=result["status"],
+        output=result["output"][:32_000],
+        stderr=result["stderr"][:32_000],
+        exit_status=result["exit_status"],
+        duration_ms=result["duration_ms"],
+        provider_duration_ms=result["provider_duration_ms"],
+    )
+    database.add(execution)
+    database.commit()
+    database.refresh(execution)
+    return _execution_response(execution)
+
+
+@router.get(
+    "/learners/{learner_id}/tutor/conversations/{conversation_id}/executions",
+    response_model=list[TutorCodeExecutionResponse],
+)
+def list_tutor_executions(
+    learner_id: int,
+    conversation_id: int,
+    database: Session = Depends(get_db),
+    user: User = Depends(require_user),
+) -> list[TutorCodeExecutionResponse]:
+    _owned_tutor_learner(learner_id, database, user)
+    conversation = _conversation_or_404(learner_id, conversation_id, database)
+    return [
+        _execution_response(execution)
+        for execution in database.scalars(
+            select(TutorCodeExecution)
+            .where(
+                TutorCodeExecution.learner_id == learner_id,
+                TutorCodeExecution.conversation_id == conversation.id,
+            )
+            .order_by(TutorCodeExecution.created_at.desc(), TutorCodeExecution.id.desc())
+            .limit(20)
+        ).all()
+    ]
 
 
 @router.get("/learners/{learner_id}/summary", response_model=LearnerSummaryResponse)

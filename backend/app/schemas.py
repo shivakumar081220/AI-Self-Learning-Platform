@@ -447,6 +447,12 @@ class TutorMessageCreate(BaseModel):
     teaching_style: TutorTeachingStyle | None = None
 
 
+class TutorAttachmentResponse(BaseModel):
+    id: int
+    content_type: Literal["image/jpeg", "image/png", "image/gif", "image/webp"]
+    size_bytes: int
+
+
 class TutorResponsePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -486,6 +492,7 @@ class TutorMessageResponse(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     response: TutorResponsePayload | None = None
+    attachments: list[TutorAttachmentResponse] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -510,6 +517,48 @@ class TutorMessageSendResponse(BaseModel):
     assistant_message: TutorMessageResponse
     response: TutorResponsePayload
     source: Literal["openrouter", "deterministic_fallback"]
+
+
+class TutorCodingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["ask", "generate", "explain", "debug", "improve", "tests", "exercise"]
+    language: Literal["python"] = "python"
+    prompt: str = Field(default="", max_length=2000)
+    code: str = Field(default="", max_length=12000)
+    execution_output: str = Field(default="", max_length=8000)
+    execution_stderr: str = Field(default="", max_length=8000)
+    execution_status: Literal["not_run", "completed", "failed", "timeout", "unavailable"] = "not_run"
+
+
+class TutorCodingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=2000)
+    code: str = Field(default="", max_length=12000)
+    explanation: str = Field(default="", max_length=5000)
+    suggested_tests: list[str] = Field(default_factory=list, max_length=12)
+
+
+class TutorCodeExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language: Literal["python"] = "python"
+    source_code: str = Field(min_length=1, max_length=12000)
+    stdin: str = Field(default="", max_length=4000)
+
+
+class TutorCodeExecutionResponse(BaseModel):
+    execution_id: int
+    language: Literal["python"]
+    status: Literal["completed", "failed", "timeout", "unavailable"]
+    output: str
+    stderr: str
+    exit_status: int | None
+    duration_ms: int | None
+    provider_duration_ms: int | None
+    created_at: datetime
+    provider_metadata_available: bool
 
 
 class LearningPathTopic(BaseModel):

@@ -16,7 +16,8 @@ FastAPI routers
     |                    |
     |                    +--> schema validation and feature fallback
     |
-    +-- code assessments --> external sandbox (optional deployment service)
+    +-- tutor images --> explicit vision-model capability check --> OpenRouter
+    +-- tutor coding --> external isolated sandbox (optional deployment service)
 ```
 
 SQLite is the default local database. Relative SQLite file URLs are resolved from the backend directory so the selected file does not change with the process working directory.
@@ -43,6 +44,9 @@ SQLite is the default local database. Relative SQLite file URLs are resolved fro
 | Multi-type assessment generation/evaluation | `services/multi_type_assessment_service.py` |
 | Skill, weakness, and recommendation updates | `services/assessment_result_service.py` and `services/learning_ai_service.py` |
 | Tutor context and conversation replies | `services/tutor_conversation_service.py` |
+| Private tutor images and signatures | `services/tutor_images.py` |
+| AI coding actions | `services/tutor_coding.py` |
+| Remote code execution client | `services/code_sandbox.py` |
 | Structured OpenRouter requests and retries | `services/ai_provider.py` |
 | Reusable generated artifacts | `services/ai_cache.py` |
 
@@ -64,12 +68,14 @@ Routers validate requests and enforce access; services implement domain operatio
 | Saved responses and evaluations | `AssessmentResponseRecord` |
 | Skills, weaknesses, and recommendations | `SkillScore`, `Weakness`, `Recommendation` |
 | Tutor history | `TutorConversation`, `TutorMessage` |
+| Private image metadata (files stay outside SQL/static assets) | `TutorAttachment` |
+| Bounded execution history, status, and output | `TutorCodeExecution` |
 
 Dashboard metrics are derived from persisted records rather than maintained as a separate snapshot. Browser storage is used for authentication state, not as the source of course or lesson data.
 
 ## AI and deterministic responsibilities
 
-OpenRouter can generate structured curricula, questions, lesson content, tutor responses, and selected interpretations/evaluations. Pydantic schemas and operation-specific checks validate output before persistence. Supported operations use curated or deterministic fallback behavior when generation is unavailable or invalid.
+OpenRouter can generate structured curricula, questions, lesson content, tutor responses, and selected interpretations/evaluations. Image input requires a separate configured vision model and a verified image-input capability from OpenRouter model metadata. Pydantic schemas and operation-specific checks validate output before persistence. Supported text operations use curated or deterministic fallback behavior; image analysis and coding assistance return explicit errors instead of implying live AI succeeded.
 
 Application logic controls password/authentication checks, ownership, objective scoring, concept updates, progress, prerequisite order, and persistence. Subjective assessment evaluation may use AI; code questions use the configured external sandbox. Fallbacks are explicitly distinguished from AI-generated responses.
 
@@ -77,4 +83,4 @@ Application logic controls password/authentication checks, ownership, objective 
 
 Provider calls have a bounded retry policy and do not log prompts, response bodies, credentials, or learner identifiers. The frontend reports request failures rather than silently accepting empty results.
 
-The current SQLite compatibility migration is hand-maintained; a production deployment should adopt a versioned migration system. Code execution requires an independently secured sandbox with process isolation, resource limits, network restrictions, and execution timeouts.
+The current SQLite compatibility migration is hand-maintained; new tutor tables are created non-destructively with SQLAlchemy `create_all`, but a production deployment should adopt a versioned migration system. Code execution requires an independently secured sandbox with process isolation, resource limits, network restrictions, and execution timeouts. The application cannot attest to those isolation properties until the configured provider passes the optional live smoke test.

@@ -1,3 +1,4 @@
+from io import BytesIO
 import json
 from collections.abc import Generator
 from datetime import datetime
@@ -5,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 
@@ -22,6 +25,8 @@ from app.models import (
     Topic,
     TopicProgress,
     TutorConversation,
+    TutorAttachment,
+    TutorCodeExecution,
     TutorMessage,
     Weakness,
 )
@@ -33,7 +38,13 @@ from app.schemas import (
 )
 from app.seed_topics import seed_topics
 from app.services.ai_provider import AIProviderError
-from app.services import ai_provider, tutor_conversation_service
+from app.services import (
+    ai_provider,
+    code_sandbox,
+    tutor_coding,
+    tutor_conversation_service,
+    tutor_images,
+)
 from app.services.tutor_conversation_service import (
     RECENT_HISTORY_LIMIT,
     build_tutor_context,
@@ -938,3 +949,394 @@ def test_distinct_learners_send_distinct_context_in_structured_provider_requests
     assert sent_contexts[0]["course"]["course_id"] != sent_contexts[1]["course"]["course_id"]
     assert sent_contexts[0]["weak_concepts"][0]["concept"] == "attention_mechanism"
     assert sent_contexts[0]["weak_concepts"][0]["topic"] != sent_contexts[1]["weak_concepts"][0]["topic"]
+
+
+def test_vision_request_uses_configured_vision_model_and_image_content(
+    tutor_client, monkeypatch, tmp_path
+):
+    _, headers, learner_id, _, topic_ids = create_context_fixture(tutor_client)
+    configure_fake_provider(monkeypatch)
+    monkeypatch.setattr(settings, "openrouter_vision_model", "test/vision-model")
+    monkeypatch.setattr(learners_router, "ensure_vision_model_supports_images", lambda model: None)
+    monkeypatch.setattr(settings, "tutor_upload_dir", str(tmp_path / "vision-images"))
+    conversation = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations",
+        headers=headers,
+        json={"topic_id": topic_ids[4]},
+    ).json()
+    image_png = b"\x89PNG\r\n\x1a\n" + b"test-image-bytes"
+
+    response = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations/{conversation['id']}/images",
+        headers=headers,
+        data={"content": "Explain attention in this image"},
+        files=[("files", ("diagram.png", image_png, "image/png"))],
+    )
+
+    assert response.status_code == 200, response.text
+    request = FakeTutorProvider.requests[-1]
+    assert request["model"] == "test/vision-model"
+    user_content = request["messages"][1]["content"]
+    assert isinstance(user_content, list)
+    assert user_content[0]["type"] == "text"
+    assert user_content[1]["type"] == "image_url"
+    assert response.json()["source"] == "openrouter"
+    assert len(response.json()["user_message"]["attachments"]) == 1
+    assert response.json()["user_message"]["attachments"][0]["content_type"] == "image/png"
+
+
+def test_image_upload_requires_vision_model_and_valid_mime_signature(
+    tutor_client, monkeypatch
+):
+    _, headers, learner_id, _, topic_ids = create_context_fixture(tutor_client)
+    conversation = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations",
+        headers=headers,
+        json={"topic_id": topic_ids[4]},
+    ).json()
+    url = f"/api/learners/{learner_id}/tutor/conversations/{conversation['id']}/images"
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(settings, "openrouter_vision_model", "")
+    unsupported = tutor_client.post(
+        url,
+        headers=headers,
+        data={"content": "Explain this"},
+        files=[("files", ("image.png", b"not an image", "image/png"))],
+    )
+    assert unsupported.status_code == 503
+    assert "OPENROUTER_VISION_MODEL" in unsupported.json()["detail"]
+
+    monkeypatch.setattr(settings, "openrouter_vision_model", "test/vision-model")
+    monkeypatch.setattr(learners_router, "ensure_vision_model_supports_images", lambda model: None)
+    invalid_signature = tutor_client.post(
+        url,
+        headers=headers,
+        data={"content": "Explain this"},
+        files=[("files", ("image.png", b"not an image", "image/png"))],
+    )
+    assert invalid_signature.status_code == 422
+    assert "contents do not match" in invalid_signature.json()["detail"]
+
+
+def test_image_upload_rejects_oversize_and_excess_file_count():
+    large = StarletteUploadFile(
+        filename="large.png",
+        file=BytesIO(b"\x89PNG\r\n\x1a\n" + b"x" * (5 * 1024 * 1024)),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    with pytest.raises(ValueError, match="no larger than 5 MB"):
+        tutor_images.validate_uploads([large])
+
+    uploads = [
+        StarletteUploadFile(
+            filename=f"{index}.png",
+            file=BytesIO(b"\x89PNG\r\n\x1a\nsmall"),
+            headers=Headers({"content-type": "image/png"}),
+        )
+        for index in range(4)
+    ]
+    with pytest.raises(ValueError, match="no more than 3"):
+        tutor_images.validate_uploads(uploads)
+
+
+def test_private_image_download_checks_conversation_owner(tutor_client, monkeypatch, tmp_path):
+    _, headers, learner_id, _, topic_ids = create_context_fixture(tutor_client)
+    _, other_headers = register(tutor_client, "Another learner", "another@example.com")
+    configure_fake_provider(monkeypatch)
+    monkeypatch.setattr(settings, "openrouter_vision_model", "test/vision-model")
+    monkeypatch.setattr(learners_router, "ensure_vision_model_supports_images", lambda model: None)
+    monkeypatch.setattr(settings, "tutor_upload_dir", str(tmp_path / "private-images"))
+    conversation = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations",
+        headers=headers,
+        json={"topic_id": topic_ids[4]},
+    ).json()
+    response = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations/{conversation['id']}/images",
+        headers=headers,
+        data={"content": "Explain attention in this diagram"},
+        files=[("files", ("diagram.png", b"\x89PNG\r\n\x1a\nrealistic-png", "image/png"))],
+    )
+    assert response.status_code == 200, response.text
+    attachment_id = response.json()["user_message"]["attachments"][0]["id"]
+
+    own_download = tutor_client.get(
+        f"/api/learners/{learner_id}/tutor/attachments/{attachment_id}",
+        headers=headers,
+    )
+    other_download = tutor_client.get(
+        f"/api/learners/{learner_id}/tutor/attachments/{attachment_id}",
+        headers=other_headers,
+    )
+
+    assert own_download.status_code == 200
+    assert own_download.headers["cache-control"] == "private, no-store"
+    assert own_download.content.startswith(b"\x89PNG")
+    assert other_download.status_code == 403
+    with Session(app.state.tutor_test_engine) as database:
+        assert database.get(TutorAttachment, attachment_id) is not None
+
+
+def test_remote_python_runner_returns_only_provider_reported_metadata(monkeypatch):
+    monkeypatch.setattr(
+        settings, "tutor_code_sandbox_url", "https://sandbox.example/api/v2/execute"
+    )
+    monkeypatch.setattr(settings, "tutor_code_sandbox_api_key", "test-sandbox-key")
+    requests = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self, limit):
+            return json.dumps(
+                {
+                    "language": "python",
+                    "version": "3.10.0",
+                    "run": {
+                        "stdout": "42\n",
+                        "stderr": "",
+                        "code": 0,
+                        "signal": None,
+                    },
+                }
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(code_sandbox, "urlopen", fake_urlopen)
+    result = code_sandbox.run_python("print(42)", "input")
+
+    assert result["status"] == "completed"
+    assert result["output"] == "42\n"
+    assert result["exit_status"] == 0
+    assert result["duration_ms"] is None
+    sent_task = json.loads(requests[0][0].data)
+    assert requests[0][0].full_url == "https://sandbox.example/api/v2/execute"
+    assert sent_task["language"] == "python"
+    assert sent_task["version"] == "3.10.0"
+    assert sent_task["files"] == [{"name": "main.py", "content": "print(42)"}]
+    assert sent_task["stdin"] == "input"
+    assert requests[0][0].get_header("Authorization") == "Bearer test-sandbox-key"
+
+
+def test_vision_model_metadata_must_advertise_image_input(monkeypatch):
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-provider-key")
+    metadata = {
+        "data": [
+            {
+                "id": "test/vision-capable",
+                "architecture": {"input_modalities": ["text", "image"]},
+            },
+            {
+                "id": "test/text-only",
+                "architecture": {"input_modalities": ["text"]},
+            },
+        ]
+    }
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self, limit):
+            return json.dumps(metadata).encode()
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr(ai_provider, "urlopen", fake_urlopen)
+    ai_provider.ensure_vision_model_supports_images("test/vision-capable")
+    with pytest.raises(AIProviderError, match="does not advertise image input"):
+        ai_provider.ensure_vision_model_supports_images("test/text-only")
+    assert requests[0].full_url.endswith("/models")
+    assert requests[0].get_header("Authorization") == "Bearer test-provider-key"
+
+
+def test_remote_python_runner_reports_missing_service_timeout_and_bad_output(monkeypatch):
+    monkeypatch.setattr(settings, "tutor_code_sandbox_url", "")
+    with pytest.raises(code_sandbox.SandboxUnavailable, match="TUTOR_CODE_SANDBOX_URL"):
+        code_sandbox.run_python("print(1)", "")
+
+    monkeypatch.setattr(
+        settings, "tutor_code_sandbox_url", "https://sandbox.example/api/v2/execute"
+    )
+    monkeypatch.setattr(
+        code_sandbox,
+        "_post_sandbox",
+        lambda payload, timeout: (_ for _ in ()).throw(code_sandbox.SandboxTimeout("timed out")),
+    )
+    with pytest.raises(code_sandbox.SandboxTimeout):
+        code_sandbox.run_python("print(1)", "")
+
+    monkeypatch.setattr(code_sandbox, "_post_sandbox", lambda payload, timeout: b"not-json")
+    with pytest.raises(code_sandbox.SandboxExecutionError, match="invalid execution result"):
+        code_sandbox.run_python("print(1)", "")
+
+
+def test_remote_python_runner_marks_nonzero_piston_exit_as_failed(monkeypatch):
+    monkeypatch.setattr(
+        settings, "tutor_code_sandbox_url", "https://sandbox.example/api/v2/execute"
+    )
+    monkeypatch.setattr(
+        code_sandbox,
+        "_post_sandbox",
+        lambda payload, timeout: json.dumps(
+            {"run": {"stdout": "", "stderr": "NameError", "code": 1, "signal": None}}
+        ).encode(),
+    )
+
+    result = code_sandbox.run_python("print(missing)", "")
+
+    assert result["status"] == "failed"
+    assert result["output"] == ""
+    assert result["stderr"] == "NameError"
+    assert result["exit_status"] == 1
+
+
+def test_ai_coding_assistant_receives_context_and_execution_result(
+    tutor_client, monkeypatch
+):
+    _, _, learner_id, _, topic_ids = create_context_fixture(tutor_client)
+    with Session(app.state.tutor_test_engine) as database:
+        context = build_tutor_context(database, learner_id, topic_ids[4])
+    configure_fake_provider(monkeypatch)
+    FakeTutorProvider.content = json.dumps(
+        {
+            "summary": "The program reads the wrong variable.",
+            "code": "print(42)",
+            "explanation": "Use the value that the calculation produced.",
+            "suggested_tests": ["Check the output is 42."],
+        }
+    )
+    result = tutor_coding.assist_with_code(
+        context,
+        tutor_coding.TutorCodingRequest(
+            action="debug",
+            code="print(answer)",
+            execution_status="failed",
+            execution_stderr="NameError: name 'answer' is not defined",
+        ),
+    )
+
+    payload = json.loads(FakeTutorProvider.requests[-1]["messages"][1]["content"])
+    assert result.code == "print(42)"
+    assert payload["learner_context"]["learner_id"] == learner_id
+    assert payload["execution_status"] == "failed"
+    assert "NameError" in payload["execution_stderr"]
+    assert "never claim code was run" in FakeTutorProvider.requests[-1]["messages"][0]["content"].lower()
+
+
+def test_execution_endpoint_persists_status_and_enforces_conversation_ownership(
+    tutor_client, monkeypatch
+):
+    _, headers, learner_id, _, topic_ids = create_context_fixture(tutor_client)
+    _, other_headers = register(tutor_client, "Another learner", "other@example.com")
+    conversation = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations",
+        headers=headers,
+        json={"topic_id": topic_ids[4]},
+    ).json()
+    monkeypatch.setattr(settings, "tutor_code_sandbox_url", "")
+    endpoint = (
+        f"/api/learners/{learner_id}/tutor/conversations/{conversation['id']}/executions"
+    )
+    unavailable = tutor_client.post(
+        endpoint,
+        headers=headers,
+        json={"language": "python", "source_code": "print('not executed')"},
+    )
+    cross_user = tutor_client.get(endpoint, headers=other_headers)
+
+    assert unavailable.status_code == 200
+    assert unavailable.json()["status"] == "unavailable"
+    assert "TUTOR_CODE_SANDBOX_URL" in unavailable.json()["stderr"]
+    assert unavailable.json()["provider_metadata_available"] is False
+    assert cross_user.status_code == 403
+    with Session(app.state.tutor_test_engine) as database:
+        record = database.get(TutorCodeExecution, unavailable.json()["execution_id"])
+        assert record is not None and record.status == "unavailable"
+
+
+def test_coding_assistant_endpoint_requires_owner_and_reports_missing_provider(
+    tutor_client, monkeypatch
+):
+    _, headers, learner_id, _, topic_ids = create_context_fixture(tutor_client)
+    _, other_headers = register(tutor_client, "Another learner", "coding-other@example.com")
+    conversation = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations",
+        headers=headers,
+        json={"topic_id": topic_ids[4]},
+    ).json()
+    endpoint = (
+        f"/api/learners/{learner_id}/tutor/conversations/"
+        f"{conversation['id']}/coding-assistant"
+    )
+    payload = {
+        "action": "generate",
+        "language": "python",
+        "prompt": "Print the number 42.",
+    }
+    cross_user = tutor_client.post(endpoint, headers=other_headers, json=payload)
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    no_provider = tutor_client.post(endpoint, headers=headers, json=payload)
+
+    assert cross_user.status_code == 403
+    assert no_provider.status_code == 503
+    assert "OpenRouter configuration" in no_provider.json()["detail"]
+
+
+def test_coding_assistant_endpoint_reports_openrouter_rate_limit(
+    tutor_client, monkeypatch
+):
+    _, headers, learner_id, _, topic_ids = create_context_fixture(tutor_client)
+    conversation = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations",
+        headers=headers,
+        json={"topic_id": topic_ids[4]},
+    ).json()
+
+    def rate_limited_assistance(*_args, **_kwargs):
+        raise AIProviderError("OpenRouter request failed", status_code=429)
+
+    monkeypatch.setattr(learners_router, "assist_with_code", rate_limited_assistance)
+    response = tutor_client.post(
+        f"/api/learners/{learner_id}/tutor/conversations/"
+        f"{conversation['id']}/coding-assistant",
+        headers=headers,
+        json={
+            "action": "explain",
+            "language": "python",
+            "code": "print('hello')",
+        },
+    )
+
+    assert response.status_code == 429
+    assert "rate-limited" in response.json()["detail"]
+    assert "Wait before retrying" in response.json()["detail"]
+
+
+def test_image_upload_cors_preflight_is_not_rejected_by_body_size_guard(tutor_client):
+    response = tutor_client.options(
+        "/api/learners/1/tutor/conversations/1/images",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"

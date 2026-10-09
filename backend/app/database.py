@@ -173,6 +173,26 @@ def ensure_legacy_columns() -> None:
                         "UPDATE topic_progress SET lesson_completed = 1, status = 'in_progress' "
                         "WHERE status = 'completed'"
                     )
+        if "tutor_attachments" in tables:
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(tutor_attachments)"
+                ).fetchall()
+            }
+            if "content_type" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE tutor_attachments ADD COLUMN content_type "
+                    "VARCHAR(40) NOT NULL DEFAULT 'image/png'"
+                )
+                connection.exec_driver_sql(
+                    "UPDATE tutor_attachments SET content_type = CASE "
+                    "WHEN lower(storage_key) LIKE '%.jpg' OR lower(storage_key) LIKE '%.jpeg' "
+                    "THEN 'image/jpeg' "
+                    "WHEN lower(storage_key) LIKE '%.gif' THEN 'image/gif' "
+                    "WHEN lower(storage_key) LIKE '%.webp' THEN 'image/webp' "
+                    "ELSE 'image/png' END"
+                )
         if "assessments" in tables:
             columns = {
                 row[1]

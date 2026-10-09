@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from . import models
 from .database import Base, SessionLocal, ensure_legacy_columns, engine
@@ -26,6 +27,26 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def tutor_image_request_limit(request: Request, call_next):
+    if request.method != "POST" or not request.url.path.endswith("/images"):
+        return await call_next(request)
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        return JSONResponse(
+            status_code=411,
+            content={"detail": "Image uploads require a bounded Content-Length request."},
+        )
+    try:
+        exceeds_limit = int(content_length) > 11 * 1024 * 1024
+    except ValueError:
+        exceeds_limit = True
+    if exceeds_limit:
+        return JSONResponse(status_code=413, content={"detail": "Image upload request is too large."})
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,

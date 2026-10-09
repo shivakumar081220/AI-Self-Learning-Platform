@@ -24,6 +24,7 @@ import {
   createTutorConversation,
   getTutorConversation,
   sendTutorMessage,
+  requestTutorCodingAssistant,
   getSkillAnalysis,
   saveAssessmentResponses,
   submitAssessment,
@@ -81,6 +82,39 @@ function WaitMessage({ children }) {
     <>
       <p>{children}</p>
       {takingLonger && <p role="status">AI generation is taking longer than expected. Your progress is safe.</p>}
+    </>
+  );
+}
+
+function TutorInlineText({ text }) {
+  return text.split(/(`[^`]+`)/g).map((part, index) => (
+    part.startsWith("`") && part.endsWith("`")
+      ? <code key={index}>{part.slice(1, -1)}</code>
+      : part
+  ));
+}
+
+function TutorExplanation({ text }) {
+  const numberedItems = [...text.matchAll(/(?:^|\s)(\d+)\.\s+/g)];
+  if (numberedItems.length === 0) {
+    return text.split(/\n\s*\n/).filter(Boolean).map((paragraph, index) => (
+      <p key={index}><TutorInlineText text={paragraph} /></p>
+    ));
+  }
+
+  const intro = text.slice(0, numberedItems[0].index).trim();
+  const items = numberedItems.map((marker, index) => {
+    const contentStart = marker.index + marker[0].length;
+    const contentEnd = numberedItems[index + 1]?.index ?? text.length;
+    return text.slice(contentStart, contentEnd).trim();
+  }).filter(Boolean);
+
+  return (
+    <>
+      {intro && <p><TutorInlineText text={intro} /></p>}
+      <ol className="tutor-coding-explanation-steps">
+        {items.map((item, index) => <li key={index}><TutorInlineText text={item} /></li>)}
+      </ol>
     </>
   );
 }
@@ -1020,7 +1054,6 @@ function LearningExperiencePage() {
   const [focusedSection, setFocusedSection] = useState(null);
   const [sectionTutorPrompt, setSectionTutorPrompt] = useState(null);
   const [isTutorOpen, setIsTutorOpen] = useState(false);
-  const [startTutorWithVoice, setStartTutorWithVoice] = useState(null);
   const closeLessonTutor = useCallback(() => setIsTutorOpen(false), []);
 
   useEffect(() => {
@@ -1029,7 +1062,6 @@ function LearningExperiencePage() {
     setFocusedSection(null);
     setSectionTutorPrompt(null);
     setIsTutorOpen(false);
-    setStartTutorWithVoice(null);
     getCurrentTopic(learnerId, courseId, topicId)
       .then((topic) => {
         setCurrentTopic(topic);
@@ -1070,14 +1102,13 @@ function LearningExperiencePage() {
       : [...current, type]);
   }
 
-  function focusTutorOnSection(sectionTitle, subsectionTitle, text, useVoice = false, prompt = null) {
+  function focusTutorOnSection(sectionTitle, subsectionTitle, text, prompt = null) {
     setFocusedSection({
       section_title: sectionTitle,
       subsection_title: subsectionTitle || null,
       content: text.slice(0, 5000),
     });
     setSectionTutorPrompt(prompt ? { id: Date.now(), text: prompt } : null);
-    setStartTutorWithVoice(useVoice ? Date.now() : null);
     setIsTutorOpen(true);
   }
 
@@ -1169,10 +1200,9 @@ function LearningExperiencePage() {
                             {subsection.key_points.length > 0 && <div className="lesson-detail-block"><strong>Important points</strong><ul>{subsection.key_points.map((point) => <li key={point}>{point}</li>)}</ul></div>}
                             {subsection.examples.length > 0 && <div className="lesson-detail-block example-detail"><strong>💡 Example</strong>{subsection.examples.map((example) => <p key={example}>{example}</p>)}</div>}
                             {subsection.practical_application && <div className="lesson-detail-block"><strong>🎯 Practical application</strong><p>{subsection.practical_application}</p></div>}
-                            {subsection.tutor_prompts.length > 0 && <div className="section-tutor-prompts"><strong>🤖 Ask about this concept</strong>{subsection.tutor_prompts.map((prompt) => <button className="text-link" key={prompt} onClick={() => focusTutorOnSection(section.title, subsection.title, subsectionText, false, prompt)} type="button">{prompt}</button>)}</div>}
+                            {subsection.tutor_prompts.length > 0 && <div className="section-tutor-prompts"><strong>🤖 Ask about this concept</strong>{subsection.tutor_prompts.map((prompt) => <button className="text-link" key={prompt} onClick={() => focusTutorOnSection(section.title, subsection.title, subsectionText, prompt)} type="button">{prompt}</button>)}</div>}
                             <div className="section-tutor-actions">
                               <button className="text-link" onClick={() => focusTutorOnSection(section.title, subsection.title, subsectionText)} type="button">💡 Have a doubt? Ask AI Tutor</button>
-                              <button className="text-link" onClick={() => focusTutorOnSection(section.title, subsection.title, subsectionText, true)} type="button">🎤 Ask by Voice</button>
                             </div>
                           </article>
                         );
@@ -1189,12 +1219,11 @@ function LearningExperiencePage() {
                 {example.expected_output && <p><strong>Expected output:</strong> <code>{example.expected_output}</code></p>}
                 <div className="section-tutor-actions">
                   <button className="text-link" onClick={() => focusTutorOnSection("Code example", example.title, `${example.explanation}\n${example.code}\nExpected output: ${example.expected_output || "not specified"}`)} type="button">💡 Have a doubt? Ask AI Tutor</button>
-                  <button className="text-link" onClick={() => focusTutorOnSection("Code example", example.title, `${example.explanation}\n${example.code}`, true)} type="button">🎤 Ask by Voice</button>
                 </div>
               </section>
             ))}
             {content.common_mistake_details.length > 0 && <section className="lesson-section lesson-mistakes" id="lesson-mistakes"><p className="eyebrow">⚠ Common mistakes</p><div className="lesson-detail-grid">{content.common_mistake_details.map((item) => <article className="lesson-detail-card" key={item.mistake}><h3>{item.mistake}</h3><p>{item.explanation}</p><p><strong>Correction:</strong> {item.correction}</p><button className="text-link" onClick={() => focusTutorOnSection("Common mistake", item.mistake, `${item.explanation}\nCorrection: ${item.correction}`)} type="button">Ask AI Tutor about this mistake</button></article>)}</div></section>}
-            {content.self_check.length > 0 && <section className="lesson-section lesson-card-section" id="lesson-self-check"><p className="eyebrow">📝 Quick self-check</p>{content.self_check.map((item) => <details className="lesson-self-check" key={item.question}><summary>{item.question}</summary><p><strong>Hint:</strong> {item.hint}</p><button className="text-link" onClick={() => focusTutorOnSection("Self-check", item.question, `Question: ${item.question}\nHint: ${item.hint}`, false, `Help me reason through this self-check without giving away an answer: ${item.question}`)} type="button">Not sure? Ask AI Tutor</button></details>)}</section>}
+            {content.self_check.length > 0 && <section className="lesson-section lesson-card-section" id="lesson-self-check"><p className="eyebrow">📝 Quick self-check</p>{content.self_check.map((item) => <details className="lesson-self-check" key={item.question}><summary>{item.question}</summary><p><strong>Hint:</strong> {item.hint}</p><button className="text-link" onClick={() => focusTutorOnSection("Self-check", item.question, `Question: ${item.question}\nHint: ${item.hint}`, `Help me reason through this self-check without giving away an answer: ${item.question}`)} type="button">Not sure? Ask AI Tutor</button></details>)}</section>}
             {content.key_takeaways.length > 0 && <section className="lesson-section lesson-card-section lesson-takeaways" id="lesson-takeaways"><p className="eyebrow">🎯 Key takeaways</p><ul>{content.key_takeaways.map((item) => <li key={item}>{item}</li>)}</ul></section>}
             <section className="note-strip practice-suggestion"><strong>🎯 Practice:</strong> {content.practice_suggestion} <span>{content.assessment_recommendation}</span></section>
             <ErrorMessage message={error} />
@@ -1203,7 +1232,7 @@ function LearningExperiencePage() {
             <div className="lesson-actions"><button className="primary-button" disabled={isCompleting || assessmentSetup || Boolean(pendingAssessment) || currentTopic.status === "completed"} onClick={handleComplete} type="button">{currentTopic.status === "completed" ? "Topic passed" : isCompleting ? "Saving progress..." : pendingAssessment ? "Assessment saved" : assessmentSetup ? "Topic completed" : "Take assessment"}</button><Link className="text-link" to={`/learning-path/${learnerId}?course_id=${encodeURIComponent(courseId || currentTopic.course_id || "")}`}>Back to course</Link></div>
           </article>
         </div>
-        <TutorPage learnerId={learnerId} topicId={currentTopic.topic_id} courseId={courseId || currentTopic.course_id} embedded isOpen={isTutorOpen} onClose={closeLessonTutor} sectionContext={focusedSection} sectionPrompt={sectionTutorPrompt} startWithVoiceId={startTutorWithVoice} onClearSectionContext={clearTutorSection} />
+        <TutorPage learnerId={learnerId} topicId={currentTopic.topic_id} courseId={courseId || currentTopic.course_id} embedded isOpen={isTutorOpen} onClose={closeLessonTutor} sectionContext={focusedSection} sectionPrompt={sectionTutorPrompt} onClearSectionContext={clearTutorSection} />
       </main>
     </div>
   );
@@ -1218,7 +1247,6 @@ function TutorPage({
   onClose,
   sectionContext: sectionContextProp = null,
   sectionPrompt: sectionPromptProp = null,
-  startWithVoiceId = null,
   onClearSectionContext,
 }) {
   const routeParams = useParams();
@@ -1237,19 +1265,19 @@ function TutorPage({
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
-  const [voiceState, setVoiceState] = useState("idle");
-  const [voiceError, setVoiceError] = useState("");
-  const [isMuted, setIsMuted] = useState(false);
   const [reloadContextKey, setReloadContextKey] = useState(0);
-  const recognitionRef = useRef(null);
-  const utteranceRef = useRef(null);
+  const [activeTutorTab, setActiveTutorTab] = useState("chat");
+  const [codingCode, setCodingCode] = useState("");
+  const [codingPrompt, setCodingPrompt] = useState("");
+  const [codingResponses, setCodingResponses] = useState([]);
+  const activeCodingResponses = codingResponses.filter(
+    (item) => item.conversationId === conversation?.id,
+  );
+  const [codingAssistantError, setCodingAssistantError] = useState("");
+  const [isCodingAssistantBusy, setIsCodingAssistantBusy] = useState(false);
+  const [codingActionInProgress, setCodingActionInProgress] = useState("");
   const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
-
-  useEffect(() => () => {
-    recognitionRef.current?.stop();
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-  }, []);
 
   useEffect(() => {
     if (!sectionPromptProp?.text) return;
@@ -1259,9 +1287,6 @@ function TutorPage({
 
   useEffect(() => {
     let active = true;
-    recognitionRef.current?.stop();
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-    setVoiceState("idle");
     setContext(null);
     setConversation(null);
     setMessages([]);
@@ -1358,29 +1383,6 @@ function TutorPage({
     }
   }
 
-  function speakResponse(text) {
-    if (isMuted) {
-      setVoiceState("idle");
-      return;
-    }
-    if (!("speechSynthesis" in window) || typeof window.SpeechSynthesisUtterance !== "function") {
-      setVoiceState("idle");
-      setVoiceError("Speech playback is not supported in this browser. The tutor response is available as text.");
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utterance = new window.SpeechSynthesisUtterance(text);
-    utterance.lang = navigator.language || "en-US";
-    utterance.onend = () => setVoiceState("idle");
-    utterance.onerror = () => {
-      setVoiceState("idle");
-      setVoiceError("Speech playback could not start. The tutor response is available as text.");
-    };
-    utteranceRef.current = utterance;
-    setVoiceState("speaking");
-    window.speechSynthesis.speak(utterance);
-  }
-
   async function beginAssessment(weakPractice = false) {
     if (!context || !topicId) return;
     try {
@@ -1404,7 +1406,57 @@ function TutorPage({
       navigate(`/assessment/${learnerId}/${assessment.assessment_id}?course_id=${encodeURIComponent(courseId || context.course?.course_id || "")}`);
     } catch (requestError) {
       setError(requestError.message);
-      setVoiceState("idle");
+    }
+  }
+
+  async function ensureActiveConversation() {
+    if (conversation) return conversation;
+    const created = await createTutorConversation(learnerId, topicId);
+    setConversation(created);
+    setConversations((items) => [created, ...items]);
+    return created;
+  }
+
+  async function askCodingAssistant(action) {
+    setCodingAssistantError("");
+    setIsCodingAssistantBusy(true);
+    setCodingActionInProgress(action);
+    try {
+      const activeConversation = await ensureActiveConversation();
+      const response = await requestTutorCodingAssistant(
+        learnerId,
+        activeConversation.id,
+        {
+          action,
+          language: "python",
+          prompt: codingPrompt,
+          code: codingCode,
+          execution_status: "not_run",
+        },
+      );
+      const actionLabels = {
+        ask: "Ask about code/output",
+        generate: "Generate code",
+        explain: "Explain this code",
+        improve: "Suggest improvement",
+        tests: "Suggest tests",
+        exercise: "Create an exercise",
+      };
+      setCodingResponses((items) => [{
+        id: `${activeConversation.id}-${Date.now()}`,
+        conversationId: activeConversation.id,
+        action,
+        actionLabel: actionLabels[action] || "AI coding tool",
+        prompt: codingPrompt.trim(),
+        code: codingCode,
+        createdAt: new Date().toISOString(),
+        response,
+      }, ...items].slice(0, 20));
+    } catch (requestError) {
+      setCodingAssistantError(requestError.message);
+    } finally {
+      setIsCodingAssistantBusy(false);
+      setCodingActionInProgress("");
     }
   }
 
@@ -1412,10 +1464,8 @@ function TutorPage({
     const content = value.trim();
     if (!content || isSending) return;
     setError("");
-    setVoiceError("");
     setIsSending(true);
     setPendingQuestion(content);
-    if (options.fromVoice) setVoiceState("processing");
     try {
       let activeConversation = conversation;
       if (!activeConversation) {
@@ -1437,16 +1487,15 @@ function TutorPage({
           : item
       )));
       setDraft("");
-      if (options.fromVoice) speakResponse(result.response.direct_answer || result.response.answer);
       if (/\bquiz me\b|\bstart (?:a )?quiz\b|\btest me\b/i.test(content)) {
         await beginAssessment(false);
       } else if (/\bpractice (?:my )?weak area\b|\bpractice weak\b/i.test(content)) {
         await beginAssessment(true);
       }
+
     } catch (requestError) {
       setError(requestError.message);
       setDraft(content);
-      if (options.fromVoice) setVoiceState("idle");
     } finally {
       setIsSending(false);
       setPendingQuestion("");
@@ -1489,72 +1538,7 @@ function TutorPage({
     question.trim() && questions.findIndex((item) => item.toLowerCase() === question.toLowerCase()) === index
   ));
 
-  useEffect(() => {
-    if (embedded && isOpen && startWithVoiceId) startVoiceRecognition();
-  }, [embedded, isOpen, startWithVoiceId]);
-
   const TutorContainer = embedded ? "section" : "main";
-  function startVoiceRecognition() {
-    setVoiceError("");
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) {
-      setVoiceState("unsupported");
-      setVoiceError("Voice input is not supported in this browser. You can type your question.");
-      return;
-    }
-    recognitionRef.current?.stop();
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-    const recognition = new Recognition();
-    recognition.lang = navigator.language || "en-US";
-    recognition.interimResults = true;
-    recognition.continuous = false;
-    recognition.onstart = () => setVoiceState("listening");
-    recognition.onresult = (event) => {
-      let transcript = "";
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        if (event.results[index].isFinal) transcript += event.results[index][0].transcript;
-      }
-      if (transcript.trim()) {
-        setDraft(transcript.trim());
-        recognition.stop();
-        sendMessage(transcript.trim(), { fromVoice: true });
-      }
-    };
-    recognition.onerror = (event) => {
-      setVoiceState("error");
-      setVoiceError(event.error === "not-allowed"
-        ? "Microphone permission was denied. You can type your question instead."
-        : "Voice input could not be completed. You can type your question instead.");
-    };
-    recognition.onend = () => {
-      setVoiceState((state) => state === "listening" ? "idle" : state);
-      recognitionRef.current = null;
-    };
-    recognitionRef.current = recognition;
-    try {
-      recognition.start();
-    } catch {
-      setVoiceState("error");
-      setVoiceError("Voice input could not start. You can type your question instead.");
-      recognitionRef.current = null;
-    }
-  }
-
-  function stopVoice() {
-    recognitionRef.current?.stop();
-    recognitionRef.current = null;
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-    setVoiceState("idle");
-  }
-
-  function toggleMute() {
-    setIsMuted((muted) => !muted);
-    if (!isMuted && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-      setVoiceState("idle");
-    }
-  }
-
   if (embedded && !isOpen) return null;
   if (isLoading) return embedded
     ? <div className="tutor-modal-backdrop"><section className="tutor-shell is-embedded tutor-modal" role="dialog" aria-modal="true" aria-label="AI Tutor"><button ref={closeButtonRef} className="tutor-close-button" aria-label="Close AI Tutor" onClick={onClose} type="button">×</button><p role="status">Preparing your learning context...</p></section></div>
@@ -1583,7 +1567,11 @@ function TutorPage({
           {sectionContextProp && <div className="tutor-section-focus"><p className="eyebrow">Section focus</p><strong>{sectionContextProp.subsection_title || sectionContextProp.section_title}</strong><p>{sectionContextProp.content.slice(0, 360)}</p><button className="text-link" onClick={onClearSectionContext} type="button">Clear section focus</button></div>}
         </header>
         {embedded && <section className="tutor-modal-suggestions" aria-label="Suggested questions"><p className="eyebrow">Try asking</p>{contextualSuggestions.map((question) => <button disabled={isSending} key={question} onClick={() => sendMessage(question)} type="button">{question}</button>)}</section>}
-        <div className="tutor-workspace">
+        <nav className="tutor-view-tabs" aria-label="Tutor views">
+          <button aria-pressed={activeTutorTab === "chat"} onClick={() => setActiveTutorTab("chat")} type="button">Chat</button>
+          <button aria-pressed={activeTutorTab === "coding"} onClick={() => setActiveTutorTab("coding")} type="button">AI coding tools</button>
+        </nav>
+        {activeTutorTab === "chat" && <div className="tutor-workspace">
           <aside className="tutor-history">
             <h2>Previous conversations</h2>
             <button className="secondary-button" onClick={startConversation} type="button">New conversation</button>
@@ -1641,26 +1629,53 @@ function TutorPage({
               {isSending && <p role="status">Tutor is preparing a context-aware explanation...</p>}
             </div>
             {!embedded && <div className="tutor-suggested-actions">{actions.map((action) => <button disabled={isSending} key={action} onClick={() => sendMessage(action)} type="button">{action}</button>)}</div>}
-            <details className="voice-tutor" id="tutor-voice-controls" open={!embedded}>
-              <summary className="voice-tutor-summary">🎤 AI Voice Tutor</summary>
-              <div className="voice-tutor-heading"><div><p className="eyebrow">AI Voice Tutor</p><h3>Talk through this module</h3></div><span className={`voice-state ${voiceState}`} role="status">{voiceState === "idle" ? "Ready" : voiceState === "listening" ? "Listening..." : voiceState === "processing" ? "Thinking..." : voiceState === "speaking" ? "Speaking..." : voiceState === "unsupported" ? "Voice input unavailable" : "Voice error"}</span></div>
-              <p>{sectionContextProp ? `Speak a question about ${sectionContextProp.subsection_title || sectionContextProp.section_title} in ${context.current_topic.title}.` : `Speak a question about ${context.current_topic.title}.`} Your transcript and response use this same saved tutor conversation.</p>
-              <div className="voice-tutor-controls">
-                <button className="primary-button" disabled={isSending || voiceState === "listening" || voiceState === "processing" || voiceState === "speaking"} onClick={startVoiceRecognition} type="button">🎤 Talk to AI Tutor</button>
-                <button className="secondary-button" disabled={voiceState !== "listening" && voiceState !== "speaking"} onClick={stopVoice} type="button">Stop</button>
-                <button className="secondary-button" aria-pressed={isMuted} disabled={!("speechSynthesis" in window) || typeof window.SpeechSynthesisUtterance !== "function"} onClick={toggleMute} type="button">{isMuted ? "Unmute" : "Mute"}</button>
-              </div>
-              {voiceState === "listening" && <p className="voice-transcript-hint">Listening for your question about this module…</p>}
-              {voiceError && <p className="voice-error" role="status">{voiceError}</p>}
-              {!("speechSynthesis" in window) && <p className="voice-transcript-hint">Speech playback is not supported; tutor responses will remain available as text.</p>}
-            </details>
             <form className="tutor-composer" onSubmit={(event) => { event.preventDefault(); sendMessage(); }}>
               <textarea aria-label="Message your tutor" maxLength={2000} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } }} onChange={(event) => setDraft(event.target.value)} placeholder={`Ask about ${focusTitle}...`} rows="3" value={draft} />
               <button className="primary-button" disabled={isSending || !draft.trim()} type="submit">{isSending ? "Thinking..." : "Send"}</button>
             </form>
             {error && <div className="tutor-error-panel"><ErrorMessage message={error} /><div className="tutor-error-actions"><button className="secondary-button" disabled={isSending || !draft.trim()} onClick={() => sendMessage(draft)} type="button">Retry</button>{embedded && <button className="text-link" onClick={onClose} type="button">Continue reading</button>}</div></div>}
           </section>
-        </div>
+        </div>}
+        {activeTutorTab === "coding" && <section className="tutor-coding-assistant">
+            <h2>AI coding tools</h2>
+            <p>Ask for Python code, explanations, improvements, or test ideas. AI suggestions are not executed.</p>
+            <label>Requirements or follow-up question<textarea aria-label="Coding requirements or question" maxLength={2000} onChange={(event) => setCodingPrompt(event.target.value)} placeholder="Describe what you want to build or ask a question about your code." rows="2" value={codingPrompt} /></label>
+            <label>Code to analyze<textarea aria-label="Code to analyze" maxLength={12000} onChange={(event) => setCodingCode(event.target.value)} placeholder="Paste Python code here for an explanation, improvement, or test suggestions." rows="8" value={codingCode} /></label>
+            <p className="tutor-coding-prompt-hint">Generate code and Ask about code require a question. Explain, Improve, and Suggest tests use the code you provide above.</p>
+            <div className="tutor-workspace-actions">
+              {[["generate", "Generate code"], ["explain", "Explain code"], ["improve", "Suggest improvement"], ["tests", "Suggest tests"], ["exercise", "Create an exercise"], ["ask", "Ask AI"]].map(([action, label]) => <button className="secondary-button" disabled={isCodingAssistantBusy || (["generate", "ask"].includes(action) && !codingPrompt.trim()) || (["explain", "improve", "tests"].includes(action) && !codingCode.trim())} key={action} onClick={() => askCodingAssistant(action)} type="button">{isCodingAssistantBusy && codingActionInProgress === action ? "AI working…" : label}</button>)}
+            </div>
+            {codingAssistantError && <div className="tutor-error-panel" role="alert"><ErrorMessage message={codingAssistantError} /><button className="text-link" onClick={() => setCodingAssistantError("")} type="button">Dismiss</button></div>}
+            <div className="tutor-coding-response-heading">
+              <h4>AI coding responses</h4>
+              {activeCodingResponses.length > 0 && <button className="text-link" onClick={() => setCodingResponses((items) => items.filter((item) => item.conversationId !== conversation?.id))} type="button">Clear responses</button>}
+            </div>
+            {isCodingAssistantBusy && <p role="status" className="tutor-result-pending">Getting a response for “{codingActionInProgress}”…</p>}
+            {activeCodingResponses.length === 0 && !isCodingAssistantBusy && <p className="tutor-result-empty">Your AI coding tool responses will appear here. Each response stays visible while you ask follow-up questions.</p>}
+            {activeCodingResponses.map((item) => <article className="tutor-code-suggestion" key={item.id}>
+              <header className="tutor-coding-response-meta"><div><p className="eyebrow">AI suggestion · not executed</p><strong>{item.actionLabel}</strong></div><time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString()}</time></header>
+              {item.prompt && <p className="tutor-coding-query"><strong>Your query:</strong> {item.prompt}</p>}
+              <details className="tutor-coding-code-context"><summary>Code included with this query</summary><pre>{item.code || "No code was provided."}</pre></details>
+              <div className="tutor-coding-response-content">
+                {item.response.summary && <section className="tutor-coding-response-block tutor-coding-response-summary">
+                  <h5>Summary</h5>
+                  <p>{item.response.summary}</p>
+                </section>}
+                {item.response.explanation && <section className="tutor-coding-response-block">
+                  <h5>Explanation</h5>
+                  <TutorExplanation text={item.response.explanation} />
+                </section>}
+                {item.response.code && <section className="tutor-coding-response-block">
+                  <div className="tutor-coding-code-heading"><h5>Suggested code</h5><span>Not executed</span></div>
+                  <pre><code>{item.response.code}</code></pre>
+                </section>}
+                {item.response.suggested_tests.length > 0 && <section className="tutor-coding-response-block">
+                  <h5>Suggested tests</h5>
+                  <ul>{item.response.suggested_tests.map((test) => <li key={test}>{test}</li>)}</ul>
+                </section>}
+              </div>
+            </article>)}
+        </section>}
       </TutorContainer>
     </div>
   );
